@@ -50,6 +50,7 @@ class SlotExtractor:
     }
     PRODUCT_NAME_PATTERNS = [
         re.compile(r"(?:商品|产品|单品|款式)[:：\s]*([\u4e00-\u9fffA-Za-z0-9\-]{2,24})(?:的|，|,|\s|$)"),
+        re.compile(r"[「「]([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)[」」]"),
         re.compile(r"(?:这款|这个|该)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?:的|，|,|\s|$)"),
     ]
 
@@ -74,12 +75,18 @@ class SlotExtractor:
             slots["scenario"] = "直播带货"
             if "开场" in query:
                 slots["sub_scenario"] = "开场话术"
+            elif "卖点" in query:
+                slots["sub_scenario"] = "卖点介绍"
             elif "产品" in query or "介绍" in query:
                 slots["sub_scenario"] = "产品介绍"
             elif "促销" in query or "秒杀" in query:
                 slots["sub_scenario"] = "促销话术"
         elif "短视频" in query or "视频" in query:
             slots["scenario"] = "短视频"
+            if "开场" in query:
+                slots["sub_scenario"] = "开场话术"
+            elif "卖点" in query or "介绍" in query or "产品" in query:
+                slots["sub_scenario"] = "卖点介绍"
         elif "种草" in query:
             slots["scenario"] = "种草文案"
 
@@ -441,10 +448,13 @@ class IntentRecognitionAgent(BaseAgent):
 
     def _fill_from_context(self, slots: Dict, session: SessionContext) -> Dict:
         """从历史对话补全缺失槽位"""
-        # 从上轮继承 category
+        # 从上轮继承 category，再从会话级 category 兜底
         if "category" not in slots and session.slot_context.slots.get("category"):
             slots["category"] = session.slot_context.slots["category"]
             slots["_category_source"] = "context_fill"
+        if "category" not in slots and getattr(session, "category", ""):
+            slots["category"] = session.category
+            slots["_category_source"] = "session_fill"
 
         # 从上轮继承 scenario
         if "scenario" not in slots and session.slot_context.slots.get("scenario"):

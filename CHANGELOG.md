@@ -7,6 +7,12 @@
 
 ### Added
 
+- 前端重构为对话引导式话术助手（深色主题 + 流式聊天气泡）：
+  - 状态机驱动引导流程：场景选择（直播/短视频）→ 类型选择（开场白/卖点介绍）→ 商品选择 → 流式生成
+  - 7 个预设商品卡片（美妆/食品/服饰）+ 自定义商品输入
+  - 自动 session 管理，用户无需感知 session_id
+  - 流式 token 实时写入聊天气泡，支持多轮追问
+  - 深色背景 + 霓虹渐变光球 + 响应式布局
 - `LLMServiceClient` 新增企业级可靠性控制层：
   - 可重试错误与不可重试错误分类（HTTP/网络/超时/载荷解析）
   - 分级超时（connect/read/total，区分 sync 与 stream）
@@ -24,6 +30,8 @@
 
 ### Changed
 
+- 前端三件套（`index.html`/`styles.css`/`app.js`）全部重写，从控制台式 Debug UI 替换为用户友好的对话式交互界面。
+- `tests/test_frontend_e2e.py` 断言更新以匹配新前端标识（`chat-area`/`advanceFlow`/`--bg-primary`）。
 - `script_agent/services/llm_client.py` 全面增强：
   - vLLM/Ollama 请求统一补充状态检查与 `raise_for_status` 路径
   - 流式与同步调用都支持重试+降级策略

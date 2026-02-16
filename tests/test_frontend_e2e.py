@@ -10,15 +10,15 @@ def test_frontend_assets_served(monkeypatch):
 
     home = client.get("/")
     assert home.status_code == 200
-    assert "script-agent-console" in home.text
+    assert "chat-area" in home.text
 
     js = client.get("/web/app.js")
     assert js.status_code == 200
-    assert "handleGenerateSync" in js.text
+    assert "advanceFlow" in js.text
 
     css = client.get("/web/styles.css")
     assert css.status_code == 200
-    assert "--primary" in css.text
+    assert "--bg-primary" in css.text
 
 
 def test_frontend_flow_e2e(monkeypatch):

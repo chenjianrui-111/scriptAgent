@@ -3,7 +3,15 @@
     "allow": [
       "Bash(pip install:*)",
       "Bash(python -c:*)",
-      "Bash(python -m pytest:*)"
+      "Bash(python -m pytest:*)",
+      "Bash(curl:*)",
+      "Bash(python -m json.tool:*)",
+      "Bash(ollama pull:*)",
+      "Bash(OLLAMA_MODEL_MAP='{\"美妆\":\"qwen2.5:0.5b\",\"食品\":\"qwen2.5:0.5b\",\"服饰\":\"qwen2.5:0.5b\",\"通用\":\"qwen2.5:0.5b\"}' APP_ENV=development LLM_FALLBACK_MODEL=qwen2.5:0.5b python:*)",
+      "Bash(pkill:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)",
+      "Bash(python3:*)"
     ]
   }
 }
