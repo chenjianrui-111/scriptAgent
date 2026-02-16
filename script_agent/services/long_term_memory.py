@@ -15,14 +15,16 @@ import re
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from script_agent.config.settings import settings
 from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
 from script_agent.models.message import GeneratedScript, IntentResult
 
 logger = logging.getLogger(__name__)
+_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9_]+")
 
 
 def _normalize(vec: List[float]) -> List[float]:
@@ -39,6 +41,34 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return float(sum(a[i] * b[i] for i in range(length)))
 
 
+def _tokenize(text: str) -> List[str]:
+    tokens = _TOKEN_PATTERN.findall((text or "").lower())
+    return tokens if tokens else ["_empty_"]
+
+
+def _jaccard(a: List[str], b: List[str]) -> float:
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / max(1, len(sa | sb))
+
+
+def _normalize_scores(rows: List[Dict[str, Any]], score_key: str) -> Dict[str, float]:
+    if not rows:
+        return {}
+    values = [float(r.get(score_key, 0.0)) for r in rows]
+    high = max(values)
+    low = min(values)
+    if abs(high - low) < 1e-9:
+        return {str(r.get("memory_id", "")): 1.0 for r in rows}
+    return {
+        str(r.get("memory_id", "")): (
+            (float(r.get(score_key, 0.0)) - low) / (high - low)
+        )
+        for r in rows
+    }
+
+
 class EmbeddingProvider(ABC):
     @abstractmethod
     async def embed(self, text: str) -> List[float]:
@@ -48,16 +78,11 @@ class EmbeddingProvider(ABC):
 class HashEmbeddingProvider(EmbeddingProvider):
     """无外部依赖的哈希向量化实现，适合作为默认回退。"""
 
-    _TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9_]+")
-
     def __init__(self, dim: int = 256):
         self._dim = max(64, dim)
 
     def _tokenize(self, text: str) -> List[str]:
-        tokens = self._TOKEN_PATTERN.findall((text or "").lower())
-        if not tokens:
-            return ["_empty_"]
-        return tokens
+        return _tokenize(text)
 
     async def embed(self, text: str) -> List[float]:
         vector = [0.0] * self._dim
@@ -106,8 +131,17 @@ class VectorStore(ABC):
         query_vector: List[float],
         filters: Dict[str, Any],
         top_k: int,
+        query_text: str = "",
     ) -> List[Dict[str, Any]]:
         ...
+
+    async def search_sparse(
+        self,
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        return []
 
     async def close(self) -> None:
         return None
@@ -139,6 +173,7 @@ class MemoryVectorStore(VectorStore):
         query_vector: List[float],
         filters: Dict[str, Any],
         top_k: int,
+        query_text: str = "",
     ) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
         for row in self._records.values():
@@ -154,6 +189,65 @@ class MemoryVectorStore(VectorStore):
                     "metadata": metadata,
                 }
             )
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates[: max(1, top_k)]
+
+    async def search_sparse(
+        self,
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        query_tokens = _tokenize(query_text)
+        docs: List[Tuple[Dict[str, Any], List[str]]] = []
+        for row in self._records.values():
+            metadata = row.get("metadata", {})
+            if any(metadata.get(k) != v for k, v in filters.items() if v):
+                continue
+            text_tokens = _tokenize(row.get("text", ""))
+            docs.append((row, text_tokens))
+
+        if not docs:
+            return []
+
+        doc_count = len(docs)
+        avg_len = sum(len(tks) for _, tks in docs) / max(1, doc_count)
+        query_set = set(query_tokens)
+        df = Counter()
+        for _, tokens in docs:
+            for token in set(tokens):
+                if token in query_set:
+                    df[token] += 1
+
+        candidates: List[Dict[str, Any]] = []
+        k1 = 1.2
+        b = 0.75
+        for row, tokens in docs:
+            tf = Counter(tokens)
+            doc_len = len(tokens)
+            score = 0.0
+            for token in query_tokens:
+                freq = tf.get(token, 0)
+                if freq <= 0:
+                    continue
+                denom = freq + k1 * (1 - b + b * doc_len / max(1e-6, avg_len))
+                idf = math.log(1 + (doc_count - df.get(token, 0) + 0.5) / (df.get(token, 0) + 0.5))
+                score += idf * ((freq * (k1 + 1)) / max(1e-9, denom))
+
+            candidates.append(
+                {
+                    "memory_id": row["memory_id"],
+                    "text": row["text"],
+                    "score": score,
+                    "metadata": row.get("metadata", {}),
+                }
+            )
+
+        if not candidates:
+            return []
+        normalized = _normalize_scores(candidates, "score")
+        for row in candidates:
+            row["score"] = normalized.get(str(row.get("memory_id", "")), 0.0)
         candidates.sort(key=lambda x: x["score"], reverse=True)
         return candidates[: max(1, top_k)]
 
@@ -242,6 +336,7 @@ class ElasticsearchVectorStore(VectorStore):
         query_vector: List[float],
         filters: Dict[str, Any],
         top_k: int,
+        query_text: str = "",
     ) -> List[Dict[str, Any]]:
         client = await self._get_client()
         must_filters = []
@@ -273,6 +368,58 @@ class ElasticsearchVectorStore(VectorStore):
                     "metadata": source.get("metadata", {}),
                 }
             )
+        return result
+
+    async def search_sparse(
+        self,
+        query_text: str,
+        filters: Dict[str, Any],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        client = await self._get_client()
+        must_filters = []
+        for key, value in filters.items():
+            if value:
+                must_filters.append({"term": {key: value}})
+        body = {
+            "size": max(1, top_k),
+            "query": {
+                "bool": {
+                    "filter": must_filters,
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": query_text,
+                                "fields": [
+                                    "text^3",
+                                    "product_name^2",
+                                    "category",
+                                    "metadata.scenario",
+                                    "metadata.intent",
+                                ],
+                                "type": "best_fields",
+                            }
+                        }
+                    ],
+                }
+            },
+        }
+        resp = await client.search(index=self._index, body=body)
+        hits = resp.get("hits", {}).get("hits", [])
+        result: List[Dict[str, Any]] = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            result.append(
+                {
+                    "memory_id": hit.get("_id", ""),
+                    "text": source.get("text", ""),
+                    "score": float(hit.get("_score", 0.0)),
+                    "metadata": source.get("metadata", {}),
+                }
+            )
+        normalized = _normalize_scores(result, "score")
+        for row in result:
+            row["score"] = normalized.get(str(row.get("memory_id", "")), 0.0)
         return result
 
     async def close(self) -> None:
@@ -324,6 +471,8 @@ class RecallQuery:
     influencer_id: str = ""
     category: str = ""
     product_name: str = ""
+    intent: str = ""
+    scenario: str = ""
     top_k: Optional[int] = None
 
 
@@ -350,10 +499,153 @@ class LongTermMemoryRetriever:
             "category": query.category,
             "product_name": query.product_name,
         }
-        top_k = query.top_k or self._cfg.top_k
-        rows = await self._store.search(query_vector, filters, top_k)
+        top_k = self._resolve_top_k(query)
+        candidate_k = max(top_k, top_k * max(1, self._cfg.hybrid_candidate_multiplier))
+
+        dense_rows = await self._store.search(
+            query_vector=query_vector,
+            filters=filters,
+            top_k=candidate_k,
+            query_text=query.text,
+        )
+        rows = dense_rows
+        if self._cfg.hybrid_enabled:
+            try:
+                sparse_rows = await self._store.search_sparse(
+                    query_text=query.text,
+                    filters=filters,
+                    top_k=candidate_k,
+                )
+                rows = self._hybrid_fuse(dense_rows, sparse_rows, query)
+            except Exception as exc:
+                logger.warning("long-term sparse recall failed, fallback dense: %s", exc)
+                rows = dense_rows
+
+        if self._cfg.rerank_enabled:
+            rows = self._rerank(rows, query)
+
+        rows = rows[:top_k]
         min_score = self._cfg.min_similarity
         return [r for r in rows if float(r.get("score", 0.0)) >= min_score]
+
+    def _resolve_top_k(self, query: RecallQuery) -> int:
+        base = query.top_k if query.top_k and query.top_k > 0 else self._cfg.top_k
+        if not self._cfg.adaptive_top_k_enabled:
+            return max(self._cfg.top_k_min, min(base, self._cfg.top_k_max))
+
+        scenario_text = (query.scenario or query.text or "").lower()
+        intent = (query.intent or "").lower()
+        delta = 0
+
+        # 场景越复杂，召回窗口越大
+        if any(k in scenario_text for k in ("开场", "问候", "破冰")):
+            delta -= 1
+        if any(k in scenario_text for k in ("产品介绍", "讲解", "卖点")):
+            delta += 1
+        if any(k in scenario_text for k in ("促销", "活动", "折扣", "大促")):
+            delta += 2
+        if any(k in scenario_text for k in ("优化", "改写", "仿写", "续写")):
+            delta += 1
+        if query.product_name:
+            delta += 1
+        if intent in {"script_modification", "script_optimization"}:
+            delta += 1
+
+        resolved = base + delta
+        return max(self._cfg.top_k_min, min(resolved, self._cfg.top_k_max))
+
+    def _hybrid_fuse(
+        self,
+        dense_rows: List[Dict[str, Any]],
+        sparse_rows: List[Dict[str, Any]],
+        query: RecallQuery,
+    ) -> List[Dict[str, Any]]:
+        dense_norm = {
+            str(r.get("memory_id", "")): (float(r.get("score", 0.0)) + 1.0) / 2.0
+            for r in dense_rows
+        }
+        sparse_norm = {
+            str(r.get("memory_id", "")): float(r.get("score", 0.0))
+            for r in sparse_rows
+        }
+        dense_rank = {str(r.get("memory_id", "")): idx + 1 for idx, r in enumerate(dense_rows)}
+        sparse_rank = {str(r.get("memory_id", "")): idx + 1 for idx, r in enumerate(sparse_rows)}
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        for row in dense_rows + sparse_rows:
+            memory_id = str(row.get("memory_id", ""))
+            if not memory_id:
+                continue
+            if memory_id not in merged:
+                merged[memory_id] = {
+                    "memory_id": memory_id,
+                    "text": row.get("text", ""),
+                    "metadata": dict(row.get("metadata", {})),
+                    "dense_score": dense_norm.get(memory_id, 0.0),
+                    "sparse_score": sparse_norm.get(memory_id, 0.0),
+                }
+            else:
+                if not merged[memory_id].get("text"):
+                    merged[memory_id]["text"] = row.get("text", "")
+                if not merged[memory_id].get("metadata"):
+                    merged[memory_id]["metadata"] = dict(row.get("metadata", {}))
+
+        fused_rows: List[Dict[str, Any]] = []
+        rrf_k = 60.0
+        wd = max(0.0, self._cfg.hybrid_dense_weight)
+        ws = max(0.0, self._cfg.hybrid_sparse_weight)
+        total = max(1e-9, wd + ws)
+        wd, ws = wd / total, ws / total
+        for memory_id, row in merged.items():
+            dense_score = row.get("dense_score", 0.0)
+            sparse_score = row.get("sparse_score", 0.0)
+            rank_boost = 0.0
+            if memory_id in dense_rank:
+                rank_boost += wd / (rrf_k + dense_rank[memory_id])
+            if memory_id in sparse_rank:
+                rank_boost += ws / (rrf_k + sparse_rank[memory_id])
+            fused = (wd * dense_score) + (ws * sparse_score) + rank_boost
+            row["score"] = max(0.0, min(1.0, fused))
+            fused_rows.append(row)
+
+        fused_rows.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        return fused_rows
+
+    def _rerank(
+        self,
+        rows: List[Dict[str, Any]],
+        query: RecallQuery,
+    ) -> List[Dict[str, Any]]:
+        if not rows:
+            return rows
+        window = max(1, self._cfg.rerank_window)
+        limited = rows[:window]
+        query_tokens = _tokenize(query.text)
+        reranked: List[Dict[str, Any]] = []
+        for row in limited:
+            metadata = row.get("metadata", {})
+            text_tokens = _tokenize(str(row.get("text", "")))
+            lexical = _jaccard(query_tokens, text_tokens)
+            boost = 0.0
+            if query.product_name and metadata.get("product_name") == query.product_name:
+                boost += 0.12
+            if query.category and metadata.get("category") == query.category:
+                boost += 0.06
+            if query.influencer_id and metadata.get("influencer_id") == query.influencer_id:
+                boost += 0.06
+            if query.intent and metadata.get("intent") == query.intent:
+                boost += 0.04
+            if query.scenario and metadata.get("scenario") == query.scenario:
+                boost += 0.03
+
+            base_score = float(row.get("score", 0.0))
+            row["score"] = max(0.0, min(1.0, base_score * 0.72 + lexical * 0.28 + boost))
+            reranked.append(row)
+
+        reranked.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        if len(rows) <= window:
+            return reranked
+        return reranked + rows[window:]
 
     async def remember_script(
         self,

@@ -61,6 +61,7 @@ class ProductAgent(BaseAgent):
             session=session,
             profile=profile,
             product=product,
+            slots=slots,
         )
 
         return message.create_response(
@@ -129,13 +130,17 @@ class ProductAgent(BaseAgent):
         session: SessionContext,
         profile: InfluencerProfile,
         product: ProductProfile,
+        slots: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        slots = slots or {}
         recall_query = RecallQuery(
             text=self._build_recall_query(query, profile, product),
             tenant_id=session.tenant_id,
             influencer_id=profile.influencer_id or session.influencer_id,
             category=product.category,
             product_name=product.name,
+            intent=str(slots.get("intent", "script_generation")),
+            scenario=str(slots.get("sub_scenario") or slots.get("scenario") or ""),
         )
         try:
             return await self._memory.recall(recall_query)

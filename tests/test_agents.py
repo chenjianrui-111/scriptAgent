@@ -686,6 +686,59 @@ class TestEnterpriseFeatures:
 
         asyncio.run(_test())
 
+    def test_session_manager_relevance_trim_preserves_key_context(self):
+        from script_agent.config.settings import settings
+        from script_agent.models.context import SessionContext
+        from script_agent.models.message import IntentResult
+        from script_agent.services.session_manager import SessionManager
+
+        async def _test():
+            manager = SessionManager()
+            session = SessionContext(session_id="s-relevance", tenant_id="t1")
+            for i in range(9):
+                session.add_turn(
+                    user_message=f"普通需求 {i}",
+                    assistant_message=f"普通回复 {i}",
+                    intent=IntentResult(intent="query", confidence=0.7),
+                )
+
+            # 构造一个旧但强相关的关键轮次
+            session.turns[2].user_message = "帮我优化小金瓶精华成分安全卖点"
+            session.turns[2].assistant_message = "小金瓶精华卖点：成分安全、提亮肤色"
+            session.turns[2].intent = IntentResult(
+                intent="script_optimization",
+                confidence=0.95,
+                slots={"product_name": "小金瓶精华"},
+            )
+            session.entity_cache.update("product", "p1", "小金瓶精华")
+            session.workflow_snapshot = {
+                "last_query": "继续优化小金瓶精华成分安全卖点",
+                "intent": {
+                    "intent": "script_optimization",
+                    "slots": {"product_name": "小金瓶精华"},
+                },
+            }
+
+            old_max = settings.context.max_turns_persisted
+            old_zone_a = settings.context.zone_a_turns
+            old_rel = settings.context.relevance_trim_enabled
+            settings.context.max_turns_persisted = 5
+            settings.context.zone_a_turns = 1
+            settings.context.relevance_trim_enabled = True
+            try:
+                await manager.save(session)
+                loaded = await manager.load("s-relevance")
+                assert loaded is not None
+                assert len(loaded.turns) == 5
+                assert any("小金瓶精华" in t.user_message for t in loaded.turns)
+            finally:
+                settings.context.max_turns_persisted = old_max
+                settings.context.zone_a_turns = old_zone_a
+                settings.context.relevance_trim_enabled = old_rel
+                await manager.close()
+
+        asyncio.run(_test())
+
     def test_longterm_memory_recall_local(self):
         from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
         from script_agent.models.message import GeneratedScript, IntentResult
@@ -735,6 +788,91 @@ class TestEnterpriseFeatures:
             assert len(hits) >= 1
             assert "小金瓶精华" in hits[0].get("text", "")
             await retriever.close()
+
+        asyncio.run(_test())
+
+    def test_longterm_memory_hybrid_rerank_prefers_product_match(self):
+        from script_agent.config.settings import settings
+        from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
+        from script_agent.models.message import GeneratedScript, IntentResult
+        from script_agent.services.long_term_memory import (
+            HashEmbeddingProvider,
+            LongTermMemoryRetriever,
+            MemoryVectorStore,
+            RecallQuery,
+        )
+
+        async def _test():
+            old_hybrid = settings.longterm_memory.hybrid_enabled
+            old_rerank = settings.longterm_memory.rerank_enabled
+            old_topk = settings.longterm_memory.top_k
+            settings.longterm_memory.hybrid_enabled = True
+            settings.longterm_memory.rerank_enabled = True
+            settings.longterm_memory.top_k = 4
+
+            retriever = LongTermMemoryRetriever(
+                store=MemoryVectorStore(),
+                embedder=HashEmbeddingProvider(dim=128),
+            )
+            try:
+                session = SessionContext(session_id="s-hybrid", tenant_id="tenant-x")
+                profile = InfluencerProfile(influencer_id="inf-x", category="美妆")
+
+                await retriever.remember_script(
+                    session=session,
+                    intent=IntentResult(intent="script_generation", confidence=0.9),
+                    profile=profile,
+                    product=ProductProfile(
+                        product_id="p1",
+                        name="小金瓶精华",
+                        category="美妆",
+                        selling_points=["提亮肤色", "成分安全"],
+                    ),
+                    script=GeneratedScript(
+                        content="小金瓶精华上脸吸收快，提亮和成分安全是核心卖点。",
+                        category="美妆",
+                        scenario="直播带货",
+                    ),
+                    query="直播介绍小金瓶精华",
+                )
+                await retriever.remember_script(
+                    session=session,
+                    intent=IntentResult(intent="script_generation", confidence=0.9),
+                    profile=profile,
+                    product=ProductProfile(
+                        product_id="p2",
+                        name="大红瓶面霜",
+                        category="美妆",
+                        selling_points=["保湿修护"],
+                    ),
+                    script=GeneratedScript(
+                        content="大红瓶面霜主打保湿修护，质地厚润。",
+                        category="美妆",
+                        scenario="直播带货",
+                    ),
+                    query="直播介绍大红瓶",
+                )
+
+                hits = await retriever.recall(
+                    RecallQuery(
+                        text="请给小金瓶精华写直播卖点，强调成分安全和提亮",
+                        tenant_id="tenant-x",
+                        influencer_id="inf-x",
+                        category="美妆",
+                        product_name="小金瓶精华",
+                        scenario="产品介绍",
+                        intent="script_generation",
+                        top_k=3,
+                    )
+                )
+                assert len(hits) >= 1
+                top_md = hits[0].get("metadata", {})
+                assert top_md.get("product_name") == "小金瓶精华"
+            finally:
+                settings.longterm_memory.hybrid_enabled = old_hybrid
+                settings.longterm_memory.rerank_enabled = old_rerank
+                settings.longterm_memory.top_k = old_topk
+                await retriever.close()
 
         asyncio.run(_test())
 

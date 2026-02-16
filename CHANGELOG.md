@@ -14,6 +14,8 @@
   - 请求幂等键透传（`Idempotency-Key`）和本地 in-flight 并发去重
   - 分层 fallback 规则（primary -> primary-general -> fallback-backend）
 - 新增 `tests/test_llm_client_reliability.py`，覆盖重试、降级、幂等并发去重、断路器开启场景。
+- 长期记忆检索新增混合召回能力（dense vector + sparse BM25）及轻量 rerank 流程，支持按场景/意图/商品动态调整 top-k。
+- 新增会话记忆“任务相关性驱动”裁剪策略：基于 query/product/intent/recency 评分，优先保留高相关轮次。
 
 ### Changed
 
@@ -24,6 +26,8 @@
 - `script_agent/config/settings.py` 增加 `LLM_*` 可靠性配置项（重试、超时、断路器、fallback 策略、幂等）。
 - 流式接口 `POST /api/v1/generate/stream` 改为复用 `Orchestrator` 统一状态推进与 checkpoint writer，不再在 API 层手写固定状态。
 - `Orchestrator.handle_stream` 对齐同步链路：支持 `checkpoint_loader/checkpoint_writer/checkpoint_saver`，checkpoint 中状态序列与审计字段统一（含 `PRODUCT_FETCHING`）。
+- `script_agent/services/long_term_memory.py` 引入 hybrid fuse + rerank + adaptive top-k，memory/elasticsearch 后端统一支持 sparse 召回接口。
+- `script_agent/services/session_manager.py` 裁剪策略升级为 relevance-aware：高相关旧轮次可被保留且避免过度压缩。
 
 ### Fixed
 

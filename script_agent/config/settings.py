@@ -157,6 +157,24 @@ class ContextConfig:
     compress_message_max_chars: int = int(
         os.getenv("SESSION_COMPRESS_MESSAGE_MAX_CHARS", "120")
     )
+    relevance_trim_enabled: bool = (
+        os.getenv("SESSION_RELEVANCE_TRIM_ENABLED", "true").lower() == "true"
+    )
+    relevance_preserve_old_turns: int = int(
+        os.getenv("SESSION_RELEVANCE_PRESERVE_OLD_TURNS", "2")
+    )
+    relevance_query_weight: float = float(
+        os.getenv("SESSION_RELEVANCE_QUERY_WEIGHT", "0.45")
+    )
+    relevance_product_weight: float = float(
+        os.getenv("SESSION_RELEVANCE_PRODUCT_WEIGHT", "0.2")
+    )
+    relevance_intent_weight: float = float(
+        os.getenv("SESSION_RELEVANCE_INTENT_WEIGHT", "0.15")
+    )
+    relevance_recency_weight: float = float(
+        os.getenv("SESSION_RELEVANCE_RECENCY_WEIGHT", "0.2")
+    )
 
 
 @dataclass
@@ -238,10 +256,31 @@ class LongTermMemoryConfig:
     enabled: bool = os.getenv("LONGTERM_MEMORY_ENABLED", "true").lower() == "true"
     backend: str = os.getenv("LONGTERM_MEMORY_BACKEND", "memory").lower()
     top_k: int = int(os.getenv("LONGTERM_MEMORY_TOP_K", "3"))
+    top_k_min: int = int(os.getenv("LONGTERM_MEMORY_TOP_K_MIN", "2"))
+    top_k_max: int = int(os.getenv("LONGTERM_MEMORY_TOP_K_MAX", "8"))
+    adaptive_top_k_enabled: bool = (
+        os.getenv("LONGTERM_MEMORY_ADAPTIVE_TOPK_ENABLED", "true").lower() == "true"
+    )
     min_similarity: float = float(os.getenv("LONGTERM_MEMORY_MIN_SIMILARITY", "0.2"))
     write_back_enabled: bool = (
         os.getenv("LONGTERM_MEMORY_WRITE_BACK_ENABLED", "true").lower() == "true"
     )
+    hybrid_enabled: bool = (
+        os.getenv("LONGTERM_MEMORY_HYBRID_ENABLED", "true").lower() == "true"
+    )
+    hybrid_candidate_multiplier: int = int(
+        os.getenv("LONGTERM_MEMORY_HYBRID_CANDIDATE_MULTIPLIER", "3")
+    )
+    hybrid_dense_weight: float = float(
+        os.getenv("LONGTERM_MEMORY_HYBRID_DENSE_WEIGHT", "0.65")
+    )
+    hybrid_sparse_weight: float = float(
+        os.getenv("LONGTERM_MEMORY_HYBRID_SPARSE_WEIGHT", "0.35")
+    )
+    rerank_enabled: bool = (
+        os.getenv("LONGTERM_MEMORY_RERANK_ENABLED", "true").lower() == "true"
+    )
+    rerank_window: int = int(os.getenv("LONGTERM_MEMORY_RERANK_WINDOW", "24"))
 
     embedding_backend: str = os.getenv(
         "LONGTERM_MEMORY_EMBEDDING_BACKEND", "hash"
