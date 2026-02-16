@@ -1,0 +1,19 @@
+services:
+  script-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: script-agent:latest
+    container_name: script-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./data:/app/data

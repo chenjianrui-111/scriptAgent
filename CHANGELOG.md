@@ -31,6 +31,11 @@
 - 新增生成链路回归测试（`tests/test_agents.py`）：
   - 长期记忆提示词注入强度随 token 预算占比变化
   - script agent 报错/空文案时 skill 返回失败
+- 新增远程部署工件：
+  - `Dockerfile`
+  - `docker-compose.prod.yml`
+  - `.env.production.example`
+  - `deploy/deploy_remote.sh`（SSH + rsync 一键部署）
 
 ### Changed
 
@@ -55,6 +60,7 @@
   - 支持 `QWEN_MODEL_LOCAL` / `QWEN_MODEL_PRODUCTION` / `VLLM_MODEL` 覆盖
 - `PromptBuilder` 的长期记忆提示词注入改为按 `longterm_token_budget/total_token_budget` 动态调节注入条数与片段长度。
 - `Orchestrator` 在 skill 失败时透传错误信息到 API `error` 字段，便于前端与调用方定位问题。
+- `README.md` 增加“远程服务器部署（Docker）”章节，包含一键部署与手动部署流程。
 
 ### Fixed
 

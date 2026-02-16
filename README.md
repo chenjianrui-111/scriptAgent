@@ -4,6 +4,10 @@
 
 当前版本见 `VERSION`，版本演进记录见 `CHANGELOG.md`。
 
+## 文档索引
+
+- 阿里云 ECS 部署手册：`DEPLOY_ALIYUN_ECS.md`
+
 ## 架构总览
 
 ```text
@@ -180,6 +184,62 @@ export APP_ENV=production
 export VLLM_BASE_URL=http://vllm-service:8000/v1
 uvicorn script_agent.api.app:app --host 0.0.0.0 --port 8080 --workers 4
 ```
+
+## 远程服务器部署（Docker）
+
+仓库已提供以下部署文件：
+
+- `Dockerfile`
+- `docker-compose.prod.yml`
+- `.env.production.example`
+- `deploy/deploy_remote.sh`
+
+### 方式一：一键远程部署（推荐）
+
+在本地执行（需本地有 `ssh` 和 `rsync`，远程有 Docker + Compose）：
+
+```bash
+# 第一次部署
+./deploy/deploy_remote.sh ubuntu@YOUR_SERVER_IP
+
+# 指定目录和端口
+./deploy/deploy_remote.sh ubuntu@YOUR_SERVER_IP /opt/script-agent 22
+```
+
+若 `LLM_FALLBACK_BACKEND=zhipu`，请先确保远程 `.env` 中 `ZHIPU_API_KEY` 不是占位值；脚本会在启动前校验该项。
+
+脚本会自动完成：
+
+- 同步项目到远程目录
+- 若远程无 `.env`，则从 `.env.production.example` 初始化
+- 执行 `docker compose -f docker-compose.prod.yml up -d --build`
+
+### 方式二：手动部署
+
+```bash
+# 1) 上传代码到服务器（任选 git clone / rsync）
+# 2) 进入项目目录
+cd /opt/script-agent
+
+# 3) 初始化生产环境变量
+cp .env.production.example .env
+# 编辑 .env，至少填写 ZHIPU_API_KEY（若 fallback 使用 zhipu）
+
+# 4) 启动
+docker compose -f docker-compose.prod.yml up -d --build
+
+# 5) 查看状态与日志
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs -f script-agent
+```
+
+### 部署后验证
+
+```bash
+curl http://YOUR_SERVER_IP:8080/api/v1/health
+```
+
+返回 `status=healthy` 即服务可用。
 
 ## 前端交互页
 
