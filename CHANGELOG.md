@@ -17,6 +17,33 @@
 
 - 待补充
 
+## [1.2.0] - 2026-02-16
+
+### Added
+
+- 新增 `ProductAgent`（`script_agent/agents/product_agent.py`），支持商品信息理解、卖点补全和商品画像构建。
+- 新增长期记忆检索模块 `script_agent/services/long_term_memory.py`：
+  - embedding 向量化（`hash`/`sentence-transformers`）
+  - 向量库检索（`memory`/`elasticsearch`）
+  - 召回过滤（tenant/influencer/category/product）
+- 编排新增 `PRODUCT_FETCHING` 状态，支持“画像 -> 商品 -> 生成”链路。
+- 生成链路接入向量召回样本提示，支持“商品卖点 + 达人风格 + 历史高相关文案”联合生成。
+- 新增会话 retention policy（保存时规则压缩 + 最大轮次裁剪 + 脚本记录裁剪）。
+
+### Changed
+
+- `ScriptGenerationAgent` 接入 `SessionContextCompressor`，多轮对话使用压缩会话记忆参与 Prompt 构建。
+- `Orchestrator` 在成功生成后自动写回长期记忆，提升后续同商品/同达人场景命中率。
+- `health` 接口新增长期记忆状态输出。
+- 配置扩展：
+  - `LONGTERM_MEMORY_*`（向量检索）
+  - `SESSION_MAX_TURNS_PERSISTED` / `SESSION_COMPRESS_ON_SAVE` 等会话 retention 配置
+
+### Fixed
+
+- 修复商品场景下仅靠达人画像生成导致卖点信息缺失的问题。
+- 修复会话历史持续增长导致上下文膨胀与存储压力累积的问题。
+
 ## [1.1.0] - 2026-02-16
 
 ### Added

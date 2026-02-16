@@ -34,11 +34,19 @@ class ScriptGenerationSkill(BaseSkill):
         slots = context.intent.slots
         profile = context.profile
         session = context.session
+        product = context.extra.get("product")
+        memory_hits = context.extra.get("memory_hits", [])
 
         # 生成
         script_msg = AgentMessage(
             trace_id=context.trace_id,
-            payload={"slots": slots, "profile": profile, "session": session},
+            payload={
+                "slots": slots,
+                "profile": profile,
+                "product": product,
+                "memory_hits": memory_hits,
+                "session": session,
+            },
             session_id=session.session_id,
         )
         script_resp = await self._script_agent(script_msg)

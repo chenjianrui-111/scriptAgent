@@ -12,6 +12,7 @@
 import json
 import uuid
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -393,6 +394,7 @@ class SessionManager:
 
     async def save(self, session: SessionContext):
         """保存会话"""
+        self._apply_retention_policy(session)
         await self._store.set(
             session.session_id,
             self._serializer.to_dict(session),
@@ -419,3 +421,66 @@ class SessionManager:
     async def close(self):
         """关闭存储连接"""
         await self._store.close()
+
+    def _apply_retention_policy(self, session: SessionContext) -> None:
+        """会话记忆规则裁剪 + 压缩（企业部署防内存膨胀）"""
+        cfg = settings.context
+        if cfg.compress_history_on_save:
+            self._compress_old_turns(session, keep_recent=max(1, cfg.zone_a_turns))
+        self._trim_turns(session, max_turns=cfg.max_turns_persisted)
+        self._trim_scripts(session, max_scripts=cfg.max_scripts_persisted)
+
+    def _compress_old_turns(self, session: SessionContext, keep_recent: int) -> None:
+        max_chars = max(40, settings.context.compress_message_max_chars)
+        old_turns = session.turns[:-keep_recent] if len(session.turns) > keep_recent else []
+        for turn in old_turns:
+            if turn.is_compressed:
+                continue
+            user = self._clip_text(turn.user_message, max_chars)
+            assistant = self._clip_text(turn.assistant_message, max_chars)
+
+            if turn.intent:
+                key_slots = ",".join(
+                    f"{k}={v}"
+                    for k, v in turn.intent.slots.items()
+                    if v and not str(k).startswith("_")
+                )
+                summary = f"intent={turn.intent.intent};slots={key_slots}"
+            else:
+                summary = ""
+
+            turn.summary = summary
+            if summary:
+                user = f"[{summary}] {user}"
+            if turn.generated_script:
+                assistant = f"[已生成话术] {assistant}"
+
+            turn.user_message = user
+            turn.assistant_message = assistant
+            turn.is_compressed = True
+            turn.token_count = int((len(user) + len(assistant)) / 1.5)
+
+    def _trim_turns(self, session: SessionContext, max_turns: int) -> None:
+        if max_turns <= 0 or len(session.turns) <= max_turns:
+            return
+        removed = len(session.turns) - max_turns
+        session.turns = session.turns[-max_turns:]
+        for idx, turn in enumerate(session.turns):
+            turn.turn_index = idx
+
+        for script in session.generated_scripts:
+            if script.turn_index >= removed:
+                script.turn_index -= removed
+            else:
+                script.turn_index = 0
+
+    def _trim_scripts(self, session: SessionContext, max_scripts: int) -> None:
+        if max_scripts <= 0 or len(session.generated_scripts) <= max_scripts:
+            return
+        session.generated_scripts = session.generated_scripts[-max_scripts:]
+
+    def _clip_text(self, text: str, max_chars: int) -> str:
+        value = re.sub(r"\s+", " ", (text or "")).strip()
+        if len(value) <= max_chars:
+            return value
+        return value[: max_chars - 3] + "..."

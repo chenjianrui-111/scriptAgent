@@ -205,6 +205,21 @@ class InfluencerProfile:
 
 
 @dataclass
+class ProductProfile:
+    """商品画像（用于商品卖点文案生成）"""
+
+    product_id: str = ""
+    name: str = ""
+    category: str = ""
+    brand: str = ""
+    price_range: str = ""
+    features: List[str] = field(default_factory=list)
+    selling_points: List[str] = field(default_factory=list)
+    target_audience: str = ""
+    compliance_notes: List[str] = field(default_factory=list)
+
+
+@dataclass
 class SessionSummary:
     """会话总结 (持久化到长期记忆)"""
     session_id: str = ""

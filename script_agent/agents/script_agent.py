@@ -13,7 +13,13 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from script_agent.agents.base import BaseAgent
 from script_agent.models.message import AgentMessage, GeneratedScript
-from script_agent.models.context import InfluencerProfile, SessionContext
+from script_agent.models.context import (
+    CompressedContext,
+    InfluencerProfile,
+    ProductProfile,
+    SessionContext,
+)
+from script_agent.context.session_compressor import SessionContextCompressor
 from script_agent.services.llm_client import LLMServiceClient
 
 logger = logging.getLogger(__name__)
@@ -52,9 +58,15 @@ class PromptBuilder:
 - 自然种草，避免硬广感""",
     }
 
-    def build(self, intent_slots: Dict[str, Any],
-              profile: InfluencerProfile,
-              session: Optional[SessionContext] = None) -> str:
+    def build(
+        self,
+        intent_slots: Dict[str, Any],
+        profile: InfluencerProfile,
+        session: Optional[SessionContext] = None,
+        product: Optional[ProductProfile] = None,
+        memory_hits: Optional[List[Dict[str, Any]]] = None,
+        compressed_context: Optional[CompressedContext] = None,
+    ) -> str:
         """构建完整的生成Prompt"""
         parts = []
 
@@ -73,8 +85,18 @@ class PromptBuilder:
         if event:
             parts.append(f"\n【活动信息】当前活动: {event}，请在话术中融入活动元素。")
 
+        # 4.1 商品信息与卖点约束
+        if product:
+            parts.append(self._build_product_prompt(product))
+
+        # 4.2 长期记忆向量召回
+        if memory_hits:
+            parts.append(self._build_memory_prompt(memory_hits))
+
         # 5. 历史对话摘要 (多轮优化场景)
-        if session and session.turns:
+        if compressed_context and compressed_context.messages:
+            parts.append(self._build_compressed_history(compressed_context))
+        elif session and session.turns:
             parts.append(self._build_history_context(session))
 
         # 6. 用户额外要求
@@ -113,6 +135,30 @@ class PromptBuilder:
             template = f"\n【品类】{category}\n" + template
         return template
 
+    def _build_product_prompt(self, product: ProductProfile) -> str:
+        lines = ["\n【商品信息】"]
+        lines.append(f"- 商品名: {product.name}")
+        if product.brand:
+            lines.append(f"- 品牌: {product.brand}")
+        if product.price_range:
+            lines.append(f"- 价格带: {product.price_range}")
+        if product.features:
+            lines.append(f"- 核心特征: {', '.join(product.features[:6])}")
+        if product.selling_points:
+            lines.append(f"- 主卖点: {', '.join(product.selling_points[:6])}")
+        if product.compliance_notes:
+            lines.append(f"- 合规提醒: {'; '.join(product.compliance_notes[:3])}")
+        return "\n".join(lines)
+
+    def _build_memory_prompt(self, memory_hits: List[Dict[str, Any]]) -> str:
+        lines = ["\n【历史高相关样本（向量召回）】"]
+        for idx, row in enumerate(memory_hits[:3], start=1):
+            text = str(row.get("text", "")).replace("\n", " ").strip()
+            score = float(row.get("score", 0.0))
+            lines.append(f"{idx}. (score={score:.3f}) {text[:180]}")
+        lines.append("请借鉴其表达方式与结构，不要逐句照搬。")
+        return "\n".join(lines)
+
     def _build_history_context(self, session: SessionContext) -> str:
         """构建历史对话摘要 (最近2轮)"""
         recent = session.turns[-2:]
@@ -123,6 +169,14 @@ class PromptBuilder:
             lines.append(f"用户: {t.user_message[:100]}")
             if t.generated_script:
                 lines.append(f"上一版话术摘要: {t.generated_script[:100]}...")
+        return "\n".join(lines)
+
+    def _build_compressed_history(self, context: CompressedContext) -> str:
+        lines = ["\n【压缩会话记忆】"]
+        for msg in context.messages[-12:]:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            lines.append(f"{role}: {content[:180]}")
         return "\n".join(lines)
 
 
@@ -149,17 +203,28 @@ class ScriptGenerationAgent(BaseAgent):
         self.llm = LLMServiceClient()
         self.prompt_builder = PromptBuilder()
         self.sensitive_filter = SensitiveWordFilter()
+        self.context_compressor = SessionContextCompressor()
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         intent_slots = message.payload.get("slots", {})
         profile: InfluencerProfile = message.payload.get(
             "profile", InfluencerProfile()
         )
+        product: ProductProfile = message.payload.get("product", ProductProfile())
+        memory_hits: List[Dict[str, Any]] = message.payload.get("memory_hits", [])
         session: SessionContext = message.payload.get("session", SessionContext())
         category = intent_slots.get("category", profile.category or "通用")
 
+        compressed_context = await self._compress_session_memory(session)
         # 1. 构建Prompt
-        prompt = self.prompt_builder.build(intent_slots, profile, session)
+        prompt = self.prompt_builder.build(
+            intent_slots,
+            profile,
+            session,
+            product=product,
+            memory_hits=memory_hits,
+            compressed_context=compressed_context,
+        )
         logger.info(f"Built prompt ({len(prompt)} chars) for category={category}")
 
         # 2. 调用LLM生成 (LoRA按category动态切换)
@@ -182,7 +247,13 @@ class ScriptGenerationAgent(BaseAgent):
             scenario=intent_slots.get("scenario", ""),
             style_keywords=intent_slots.get("style_hint", "").split(","),
             turn_index=len(session.turns),
-            generation_params={"prompt_length": len(prompt)},
+            generation_params={
+                "prompt_length": len(prompt),
+                "memory_hits": len(memory_hits),
+                "compressed_context_tokens": (
+                    compressed_context.token_count if compressed_context else 0
+                ),
+            },
         )
 
         return message.create_response(
@@ -190,13 +261,25 @@ class ScriptGenerationAgent(BaseAgent):
             source=self.name,
         )
 
-    async def generate_stream(self, intent_slots: Dict,
-                               profile: InfluencerProfile,
-                               session: SessionContext
-                               ) -> AsyncGenerator[str, None]:
+    async def generate_stream(
+        self,
+        intent_slots: Dict[str, Any],
+        profile: InfluencerProfile,
+        session: SessionContext,
+        product: Optional[ProductProfile] = None,
+        memory_hits: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncGenerator[str, None]:
         """流式生成接口 (供API层使用)"""
         category = intent_slots.get("category", profile.category or "通用")
-        prompt = self.prompt_builder.build(intent_slots, profile, session)
+        compressed_context = await self._compress_session_memory(session)
+        prompt = self.prompt_builder.build(
+            intent_slots,
+            profile,
+            session,
+            product=product,
+            memory_hits=memory_hits or [],
+            compressed_context=compressed_context,
+        )
 
         buffer = ""
         async for token in self.llm.generate(prompt, category=category):
@@ -207,3 +290,18 @@ class ScriptGenerationAgent(BaseAgent):
                 yield "[内容涉及敏感词，已终止生成]"
                 return
             yield token
+
+    async def _compress_session_memory(
+        self,
+        session: SessionContext,
+    ) -> Optional[CompressedContext]:
+        if not session.turns:
+            return None
+        # 仅在轮次较多时启用分级压缩，减少额外开销
+        if len(session.turns) <= (self.context_compressor.cfg.zone_a_turns + 1):
+            return None
+        try:
+            return await self.context_compressor.compress(session)
+        except Exception as exc:
+            logger.warning("session memory compression failed: %s", exc)
+            return None

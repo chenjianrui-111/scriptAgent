@@ -141,6 +141,17 @@ class TestIntentAgent:
         assert "lively" in slots.get("style_hint", "")
         assert "humorous" in slots.get("style_hint", "")
 
+    def test_slot_extraction_product(self):
+        from script_agent.agents.intent_agent import SlotExtractor
+
+        extractor = SlotExtractor()
+        slots = extractor.extract(
+            "帮我写这款小金瓶精华的直播话术，卖点：成分安全、提亮肤色",
+            "script_generation",
+        )
+        assert "小金瓶精华" in slots.get("product_name", "")
+        assert "成分安全" in slots.get("selling_points", [])
+
     def test_reference_resolver(self):
         from script_agent.agents.intent_agent import ReferenceResolver
         from script_agent.models.context import SessionContext, EntityCache
@@ -531,6 +542,119 @@ class TestEnterpriseFeatures:
             assert allow2.allowed
             assert not deny_qps.allowed
             assert deny_qps.reason == "qps_limit_exceeded"
+
+        asyncio.run(_test())
+
+    def test_session_manager_retention_policy(self):
+        from script_agent.config.settings import settings
+        from script_agent.models.context import SessionContext
+        from script_agent.services.session_manager import SessionManager
+
+        async def _test():
+            manager = SessionManager()
+            session = SessionContext(session_id="s-retain", tenant_id="t1")
+            for i in range(settings.context.max_turns_persisted + 5):
+                session.add_turn(
+                    user_message=("用户需求很长 " + str(i)) * 20,
+                    assistant_message=("系统回复很长 " + str(i)) * 20,
+                )
+
+            await manager.save(session)
+            loaded = await manager.load("s-retain")
+            assert loaded is not None
+            assert len(loaded.turns) <= settings.context.max_turns_persisted
+            if len(loaded.turns) > settings.context.zone_a_turns:
+                assert any(
+                    t.is_compressed
+                    for t in loaded.turns[:-settings.context.zone_a_turns]
+                )
+            await manager.close()
+
+        asyncio.run(_test())
+
+    def test_longterm_memory_recall_local(self):
+        from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
+        from script_agent.models.message import GeneratedScript, IntentResult
+        from script_agent.services.long_term_memory import (
+            HashEmbeddingProvider,
+            LongTermMemoryRetriever,
+            MemoryVectorStore,
+            RecallQuery,
+        )
+
+        async def _test():
+            retriever = LongTermMemoryRetriever(
+                store=MemoryVectorStore(),
+                embedder=HashEmbeddingProvider(dim=128),
+            )
+            session = SessionContext(session_id="s-memory", tenant_id="tenant-x")
+            profile = InfluencerProfile(influencer_id="inf-x", category="美妆")
+            product = ProductProfile(
+                product_id="p1",
+                name="小金瓶精华",
+                category="美妆",
+                selling_points=["提亮肤色", "成分安全"],
+            )
+            script = GeneratedScript(
+                content="姐妹们这款小金瓶精华上脸吸收快，提亮很明显，成分也很安心。",
+                category="美妆",
+                scenario="直播带货",
+            )
+            await retriever.remember_script(
+                session=session,
+                intent=IntentResult(intent="script_generation", confidence=0.9),
+                profile=profile,
+                product=product,
+                script=script,
+                query="直播介绍小金瓶精华",
+            )
+            hits = await retriever.recall(
+                RecallQuery(
+                    text="小金瓶精华 直播卖点 提亮 成分安全",
+                    tenant_id="tenant-x",
+                    influencer_id="inf-x",
+                    category="美妆",
+                    product_name="小金瓶精华",
+                    top_k=3,
+                )
+            )
+            assert len(hits) >= 1
+            assert "小金瓶精华" in hits[0].get("text", "")
+            await retriever.close()
+
+        asyncio.run(_test())
+
+    def test_product_agent_builds_profile(self):
+        from script_agent.agents.product_agent import ProductAgent
+        from script_agent.models.context import InfluencerProfile, SessionContext
+        from script_agent.services.long_term_memory import (
+            HashEmbeddingProvider,
+            LongTermMemoryRetriever,
+            MemoryVectorStore,
+        )
+
+        async def _test():
+            retriever = LongTermMemoryRetriever(
+                store=MemoryVectorStore(),
+                embedder=HashEmbeddingProvider(dim=128),
+            )
+            agent = ProductAgent(memory=retriever)
+            profile = InfluencerProfile(influencer_id="inf-1", category="美妆")
+            session = SessionContext(session_id="s-product", tenant_id="t1")
+            product, _hits = await agent.fetch(
+                {
+                    "category": "美妆",
+                    "product_name": "小金瓶精华",
+                    "selling_points": ["成分安全", "提亮肤色"],
+                },
+                profile=profile,
+                session=session,
+                query="帮我写小金瓶精华卖点文案",
+            )
+            assert product.name == "小金瓶精华"
+            assert "成分安全" in product.selling_points
+            assert product.category == "美妆"
+            await retriever.close()
 
         asyncio.run(_test())
 

@@ -34,13 +34,21 @@ class BatchGenerateSkill(BaseSkill):
         slots = context.intent.slots
         profile = context.profile
         session = context.session
+        product = context.extra.get("product")
+        memory_hits = context.extra.get("memory_hits", [])
 
         async def gen_one(scenario: str) -> GeneratedScript:
             s = dict(slots)
             s["sub_scenario"] = scenario
             msg = AgentMessage(
                 trace_id=context.trace_id,
-                payload={"slots": s, "profile": profile, "session": session},
+                payload={
+                    "slots": s,
+                    "profile": profile,
+                    "product": product,
+                    "memory_hits": memory_hits,
+                    "session": session,
+                },
                 session_id=session.session_id,
             )
             resp = await self._script_agent(msg)

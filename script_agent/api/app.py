@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="话术助手 Agent API",
     description="基于LoRA微调的多Agent协作系统，为达人自动生成垂类定制话术",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -344,6 +344,7 @@ async def health_check():
     lock_stats = await session_lock_manager.stats()
     checkpoint_stats = await checkpoint_manager.stats()
     core_rate_stats = await core_rate_limiter.stats()
+    memory_stats = await orchestrator.memory_retriever.stats()
     return {
         "status": "healthy",
         "app": settings.app_name,
@@ -352,6 +353,7 @@ async def health_check():
         "session_locks": lock_stats,
         "checkpoint_store": checkpoint_stats,
         "core_rate_limit": core_rate_stats,
+        "longterm_memory": memory_stats,
     }
 
 

@@ -48,6 +48,10 @@ class SlotExtractor:
         "618": "618大促", "双11": "双十一", "双十一": "双十一",
         "年货节": "年货节", "38节": "38女王节", "双12": "双十二",
     }
+    PRODUCT_NAME_PATTERNS = [
+        re.compile(r"(?:商品|产品|单品|款式)[:：\s]*([\u4e00-\u9fffA-Za-z0-9\-]{2,24})(?:的|，|,|\s|$)"),
+        re.compile(r"(?:这款|这个|该)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?:的|，|,|\s|$)"),
+    ]
 
     def extract(self, query: str, intent: str = "") -> Dict[str, Any]:
         slots: Dict[str, Any] = {}
@@ -96,6 +100,26 @@ class SlotExtractor:
                 style_hints.append(en)
         if style_hints:
             slots["style_hint"] = ",".join(style_hints)
+
+        # 6. 商品槽位（商品名/卖点）
+        for pattern in self.PRODUCT_NAME_PATTERNS:
+            match = pattern.search(query)
+            if match:
+                slots["product_name"] = match.group(1).strip()
+                break
+        if "卖点" in query:
+            # e.g. 卖点：成分安全、持妆久
+            for sep in ("卖点:", "卖点："):
+                if sep in query:
+                    raw = query.split(sep, 1)[1]
+                    points = [
+                        p.strip()
+                        for p in re.split(r"[，,、;；。\n]", raw)
+                        if p.strip()
+                    ]
+                    if points:
+                        slots["selling_points"] = points[:8]
+                    break
 
         return slots
 
@@ -431,6 +455,14 @@ class IntentRecognitionAgent(BaseAgent):
             cached = session.entity_cache.get_latest("influencer")
             if cached:
                 slots["target_name"] = cached.get("name", "")
+
+        # 从历史继承商品信息
+        if "product_name" not in slots and session.slot_context.slots.get("product_name"):
+            slots["product_name"] = session.slot_context.slots["product_name"]
+        if "product_name" not in slots:
+            cached_product = session.entity_cache.get_latest("product")
+            if cached_product:
+                slots["product_name"] = cached_product.get("name", "")
 
         return slots
 

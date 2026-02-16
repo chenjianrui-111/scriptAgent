@@ -22,6 +22,7 @@ class WorkflowState(str, Enum):
     INTENT_RECOGNIZING = "INTENT_RECOGNIZING"
     INTENT_CLARIFYING = "INTENT_CLARIFYING"           # 意图澄清
     PROFILE_FETCHING = "PROFILE_FETCHING"
+    PRODUCT_FETCHING = "PRODUCT_FETCHING"             # 商品信息获取与召回
     SCRIPT_GENERATING = "SCRIPT_GENERATING"
     QUALITY_CHECKING = "QUALITY_CHECKING"
     COMPLETED = "COMPLETED"
@@ -177,8 +178,13 @@ class StateMachine:
             # 生成流程
             Transition(
                 WorkflowState.PROFILE_FETCHING,
+                WorkflowState.PRODUCT_FETCHING,
+                description="画像获取完成 → 获取商品信息",
+            ),
+            Transition(
+                WorkflowState.PRODUCT_FETCHING,
                 WorkflowState.SCRIPT_GENERATING,
-                description="画像获取完成 → 生成话术",
+                description="商品信息获取完成 → 生成话术",
             ),
             Transition(
                 WorkflowState.SCRIPT_GENERATING,

@@ -94,6 +94,17 @@ class ContextConfig:
     # LLMLingua-2 配置
     llmlingua_target_ratio: float = 0.5
     llmlingua_model: str = "xlm-roberta-base"
+    # 会话记忆持久化裁剪策略
+    max_turns_persisted: int = int(os.getenv("SESSION_MAX_TURNS_PERSISTED", "30"))
+    max_scripts_persisted: int = int(
+        os.getenv("SESSION_MAX_SCRIPTS_PERSISTED", "80")
+    )
+    compress_history_on_save: bool = (
+        os.getenv("SESSION_COMPRESS_ON_SAVE", "true").lower() == "true"
+    )
+    compress_message_max_chars: int = int(
+        os.getenv("SESSION_COMPRESS_MESSAGE_MAX_CHARS", "120")
+    )
 
 
 @dataclass
@@ -169,6 +180,33 @@ class CoreRateLimitConfig:
 
 
 @dataclass
+class LongTermMemoryConfig:
+    """长期记忆检索配置（Embedding + Vector Search）"""
+
+    enabled: bool = os.getenv("LONGTERM_MEMORY_ENABLED", "true").lower() == "true"
+    backend: str = os.getenv("LONGTERM_MEMORY_BACKEND", "memory").lower()
+    top_k: int = int(os.getenv("LONGTERM_MEMORY_TOP_K", "3"))
+    min_similarity: float = float(os.getenv("LONGTERM_MEMORY_MIN_SIMILARITY", "0.2"))
+    write_back_enabled: bool = (
+        os.getenv("LONGTERM_MEMORY_WRITE_BACK_ENABLED", "true").lower() == "true"
+    )
+
+    embedding_backend: str = os.getenv(
+        "LONGTERM_MEMORY_EMBEDDING_BACKEND", "hash"
+    ).lower()
+    embedding_dim: int = int(os.getenv("LONGTERM_MEMORY_EMBEDDING_DIM", "256"))
+    embedding_model: str = os.getenv(
+        "LONGTERM_MEMORY_EMBEDDING_MODEL", "all-MiniLM-L6-v2"
+    )
+
+    es_url: str = os.getenv("LONGTERM_MEMORY_ES_URL", "http://localhost:9200")
+    es_index: str = os.getenv("LONGTERM_MEMORY_ES_INDEX", "script_agent_memories")
+    es_username: str = os.getenv("LONGTERM_MEMORY_ES_USERNAME", "")
+    es_password: str = os.getenv("LONGTERM_MEMORY_ES_PASSWORD", "")
+    es_timeout_seconds: int = int(os.getenv("LONGTERM_MEMORY_ES_TIMEOUT_SECONDS", "8"))
+
+
+@dataclass
 class AppConfig:
     """应用总配置"""
     app_name: str = "script_agent"
@@ -185,6 +223,9 @@ class AppConfig:
     orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     core_rate_limit: CoreRateLimitConfig = field(default_factory=CoreRateLimitConfig)
+    longterm_memory: LongTermMemoryConfig = field(
+        default_factory=LongTermMemoryConfig
+    )
 
 
 # 全局配置单例

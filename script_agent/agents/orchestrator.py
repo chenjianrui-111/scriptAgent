@@ -14,11 +14,17 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, Optional, TypedDict
 
 from script_agent.agents.intent_agent import IntentRecognitionAgent
+from script_agent.agents.product_agent import ProductAgent
 from script_agent.agents.profile_agent import ProfileAgent
 from script_agent.agents.quality_agent import QualityCheckAgent
 from script_agent.agents.script_agent import ScriptGenerationAgent
 from script_agent.config.settings import settings
-from script_agent.models.context import InfluencerProfile, SessionContext, StyleProfile
+from script_agent.models.context import (
+    InfluencerProfile,
+    ProductProfile,
+    SessionContext,
+    StyleProfile,
+)
 from script_agent.models.message import (
     AgentMessage,
     GeneratedScript,
@@ -28,6 +34,7 @@ from script_agent.models.message import (
 )
 from script_agent.models.state_machine import WorkflowState
 from script_agent.observability import metrics as obs
+from script_agent.services.long_term_memory import LongTermMemoryRetriever
 from script_agent.skills.base import SkillContext, SkillResult
 from script_agent.skills.registry import SkillRegistry
 
@@ -66,6 +73,8 @@ class OrchestrationState(TypedDict, total=False):
 
     intent_result: IntentResult
     profile: InfluencerProfile
+    product: ProductProfile
+    memory_hits: list[Dict[str, Any]]
     script: GeneratedScript
     quality_result: QualityResult
     quality_feedback: list[str]
@@ -84,8 +93,10 @@ class Orchestrator:
     """中央编排器 (LangGraph)"""
 
     def __init__(self):
+        self.memory_retriever = LongTermMemoryRetriever()
         self.intent_agent = IntentRecognitionAgent()
         self.profile_agent = ProfileAgent()
+        self.product_agent = ProductAgent(memory=self.memory_retriever)
         self.script_agent = ScriptGenerationAgent()
         self.quality_agent = QualityCheckAgent()
 
@@ -125,6 +136,7 @@ class Orchestrator:
         builder.add_node("intent_clarifying", self._node_intent_clarifying)
         builder.add_node("skill_executing", self._node_skill_executing)
         builder.add_node("profile_fetching", self._node_profile_fetching)
+        builder.add_node("product_fetching", self._node_product_fetching)
         builder.add_node("script_generating", self._node_script_generating)
         builder.add_node("quality_checking", self._node_quality_checking)
         builder.add_node("completed", self._node_completed)
@@ -144,7 +156,8 @@ class Orchestrator:
 
         builder.add_edge("intent_clarifying", "completed")
         builder.add_edge("skill_executing", "completed")
-        builder.add_edge("profile_fetching", "script_generating")
+        builder.add_edge("profile_fetching", "product_fetching")
+        builder.add_edge("product_fetching", "script_generating")
         builder.add_edge("script_generating", "quality_checking")
 
         builder.add_conditional_edges(
@@ -260,6 +273,7 @@ class Orchestrator:
             return state
 
         state.update(await self._node_profile_fetching(state))
+        state.update(await self._node_product_fetching(state))
         while True:
             state.update(await self._node_script_generating(state))
             state.update(await self._node_quality_checking(state))
@@ -387,11 +401,33 @@ class Orchestrator:
         if profile is None:
             profile = await self.profile_agent.fetch(intent_result.slots)
 
+        product = state.get("product")
+        memory_hits = list(state.get("memory_hits", []))
+        if intent_result.intent in {"script_generation", "script_optimization"}:
+            product, memory_hits = await self.product_agent.fetch(
+                intent_result.slots,
+                profile,
+                session,
+                query=query,
+            )
+            if product.name:
+                session.entity_cache.update(
+                    "product",
+                    product.product_id or product.name,
+                    product.name,
+                )
+                intent_result.slots.setdefault("product_name", product.name)
+                session.slot_context.update(intent_result.intent, intent_result.slots)
+
         skill_ctx = SkillContext(
             intent=intent_result,
             profile=profile,
             session=session,
             trace_id=trace_id,
+            extra={
+                "product": product,
+                "memory_hits": memory_hits,
+            },
         )
         skill_result = await skill.execute(skill_ctx)
 
@@ -421,6 +457,10 @@ class Orchestrator:
             "current_state": current_state,
             "timing": timing,
             "profile": profile,
+            "product": product,
+            "memory_hits": memory_hits,
+            "script": skill_result.script,
+            "quality_result": skill_result.quality_result,
             "skill_result": skill_result,
             "result": result,
         }
@@ -469,6 +509,50 @@ class Orchestrator:
         await self._write_checkpoint({**state, **updates}, status="in_progress")
         return updates
 
+    async def _node_product_fetching(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.PRODUCT_FETCHING)
+
+        session = state["session"]
+        intent_result = state.get("intent_result", IntentResult(intent="unknown", confidence=0.0))
+        profile = state.get("profile", InfluencerProfile())
+
+        product = state.get("product")
+        memory_hits = list(state.get("memory_hits", []))
+        if product is None:
+            product, memory_hits = await self.product_agent.fetch(
+                intent_result.slots,
+                profile,
+                session,
+                query=state.get("query", ""),
+            )
+
+        if product and product.name:
+            session.entity_cache.update(
+                "product",
+                product.product_id or product.name,
+                product.name,
+            )
+            intent_result.slots.setdefault("product_name", product.name)
+            session.slot_context.update(intent_result.intent, intent_result.slots)
+
+        timing = dict(state.get("timing", {}))
+        timing["product_fetching"] = (time.perf_counter() - t0) * 1000
+
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "product": product,
+            "memory_hits": memory_hits,
+            "intent_result": intent_result,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
+
     async def _node_script_generating(
         self,
         state: OrchestrationState,
@@ -479,6 +563,8 @@ class Orchestrator:
         session = state["session"]
         intent_result = state.get("intent_result", IntentResult(intent="unknown", confidence=0.0))
         profile = state.get("profile", InfluencerProfile())
+        product = state.get("product", ProductProfile())
+        memory_hits = list(state.get("memory_hits", []))
 
         should_reuse_script = bool(state.get("script")) and bool(
             state.get("quality_result") is None and state.get("retry_count", 0) == 0
@@ -489,6 +575,8 @@ class Orchestrator:
             payload = {
                 "slots": intent_result.slots,
                 "profile": profile,
+                "product": product,
+                "memory_hits": memory_hits,
                 "session": session,
             }
             if state.get("quality_feedback"):
@@ -509,6 +597,8 @@ class Orchestrator:
             "state_history": history,
             "current_state": current_state,
             "timing": timing,
+            "product": product,
+            "memory_hits": memory_hits,
             "script": script,
             "quality_result": None,
         }
@@ -582,8 +672,9 @@ class Orchestrator:
         result = dict(state.get("result", {}))
         intent_result = state.get("intent_result")
         profile = state.get("profile")
-        script = state.get("script")
-        quality_result = state.get("quality_result")
+        script = state.get("script") or result.get("script")
+        quality_result = state.get("quality_result") or result.get("quality_result")
+        product = state.get("product")
 
         final_state = WorkflowState.COMPLETED
         if state.get("needs_clarification"):
@@ -613,6 +704,8 @@ class Orchestrator:
         if script:
             result["script"] = script
             result["quality_result"] = quality_result
+        if product:
+            result["product"] = product
         result["success"] = success
         if intent_result:
             result["intent"] = intent_result
@@ -629,6 +722,8 @@ class Orchestrator:
                 "success" if result.get("success") else "error",
                 result.get("skill_used", "default"),
             )
+        if result.get("success") and script is not None:
+            await self._remember_long_term(state, script)
 
         updates = {
             "state_history": history,
@@ -692,6 +787,7 @@ class Orchestrator:
             return None
         quality = self._to_quality(snapshot.get("quality_result"))
         intent = self._to_intent_result(snapshot.get("intent"))
+        product = self._to_product(snapshot.get("product"))
 
         result: Dict[str, Any] = {
             "trace_id": trace_id,
@@ -706,6 +802,8 @@ class Orchestrator:
         }
         if intent:
             result["intent"] = intent
+        if product:
+            result["product"] = product
         obs.record_workflow_cache_hit()
         obs.record_request(
             intent.intent if intent else "unknown",
@@ -755,6 +853,21 @@ class Orchestrator:
                 interaction_frequency=float(style_data.get("interaction_frequency", 0.5)),
                 humor_level=float(style_data.get("humor_level", 0.3)),
             ),
+        )
+
+    def _to_product(self, data: Any) -> Optional[ProductProfile]:
+        if not isinstance(data, dict):
+            return None
+        return ProductProfile(
+            product_id=data.get("product_id", ""),
+            name=data.get("name", ""),
+            category=data.get("category", ""),
+            brand=data.get("brand", ""),
+            price_range=data.get("price_range", ""),
+            features=list(data.get("features", [])),
+            selling_points=list(data.get("selling_points", [])),
+            target_audience=data.get("target_audience", ""),
+            compliance_notes=list(data.get("compliance_notes", [])),
         )
 
     def _to_script(self, data: Any) -> Optional[GeneratedScript]:
@@ -812,6 +925,10 @@ class Orchestrator:
         if profile:
             seed["profile"] = profile
 
+        product = self._to_product(snapshot.get("product"))
+        if product:
+            seed["product"] = product
+
         script = self._to_script(snapshot.get("script"))
         if script:
             seed["script"] = script
@@ -838,8 +955,10 @@ class Orchestrator:
         session = state["session"]
         intent = state.get("intent_result")
         profile = state.get("profile")
+        product = state.get("product")
         script = state.get("script")
         quality_result = state.get("quality_result")
+        memory_hits = list(state.get("memory_hits", []))
 
         snapshot: Dict[str, Any] = {
             "version": 1,
@@ -879,6 +998,18 @@ class Orchestrator:
                     "humor_level": profile.style.humor_level,
                 },
             }
+        if product:
+            snapshot["product"] = {
+                "product_id": product.product_id,
+                "name": product.name,
+                "category": product.category,
+                "brand": product.brand,
+                "price_range": product.price_range,
+                "features": list(product.features),
+                "selling_points": list(product.selling_points),
+                "target_audience": product.target_audience,
+                "compliance_notes": list(product.compliance_notes),
+            }
         if script:
             max_chars = settings.orchestration.checkpoint_script_max_chars
             content = script.content
@@ -908,6 +1039,14 @@ class Orchestrator:
                 "style_consistency": quality_result.style_consistency,
                 "suggestions": list(quality_result.suggestions),
             }
+        if memory_hits:
+            snapshot["memory_hits"] = [
+                {
+                    "memory_id": m.get("memory_id", ""),
+                    "score": round(float(m.get("score", 0.0)), 4),
+                }
+                for m in memory_hits[:5]
+            ]
 
         checkpoint_writer = state.get("checkpoint_writer")
         if checkpoint_writer is not None:
@@ -948,6 +1087,27 @@ class Orchestrator:
         ):
             await checkpoint_saver(session)
 
+    async def _remember_long_term(
+        self,
+        state: OrchestrationState,
+        script: GeneratedScript,
+    ) -> None:
+        intent = state.get("intent_result")
+        profile = state.get("profile")
+        session = state["session"]
+        product = state.get("product")
+        try:
+            await self.memory_retriever.remember_script(
+                session=session,
+                intent=intent,
+                profile=profile,
+                product=product,
+                script=script,
+                query=state.get("query", ""),
+            )
+        except Exception as exc:
+            logger.warning("long-term memory write failed: %s", exc)
+
     async def handle_stream(
         self,
         query: str,
@@ -971,11 +1131,19 @@ class Orchestrator:
             return
 
         profile = await self.profile_agent.fetch(intent_result.slots)
+        product, memory_hits = await self.product_agent.fetch(
+            intent_result.slots,
+            profile,
+            session,
+            query=query,
+        )
 
         async for token in self.script_agent.generate_stream(
             intent_result.slots,
             profile,
             session,
+            product=product,
+            memory_hits=memory_hits,
         ):
             yield token
 
@@ -984,6 +1152,8 @@ class Orchestrator:
             "langgraph_enabled": self._graph is not None,
             "dedup_enabled": settings.orchestration.request_dedup_enabled,
             "checkpoint_auto_save": settings.orchestration.checkpoint_auto_save,
+            "longterm_memory_enabled": settings.longterm_memory.enabled,
+            "longterm_memory_backend": settings.longterm_memory.backend,
         }
 
     async def shutdown(self) -> None:
@@ -992,6 +1162,7 @@ class Orchestrator:
         for agent in (
             self.intent_agent,
             self.profile_agent,
+            self.product_agent,
             self.script_agent,
             self.quality_agent,
         ):
@@ -1019,3 +1190,7 @@ class Orchestrator:
                     await close()
                 except Exception:
                     logger.warning("Failed to close client: %s", type(client).__name__)
+        try:
+            await self.memory_retriever.close()
+        except Exception:
+            logger.warning("Failed to close LongTermMemoryRetriever")

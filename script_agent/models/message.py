@@ -24,6 +24,7 @@ class AgentRole(str, Enum):
     ORCHESTRATOR = "orchestrator"
     INTENT = "intent_recognition"
     PROFILE = "profile"
+    PRODUCT = "product"
     SCRIPT_GENERATION = "script_generation"
     QUALITY_CHECK = "quality_check"
 

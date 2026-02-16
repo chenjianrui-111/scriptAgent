@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "script-agent"
-version = "1.1.0"
+version = "1.2.0"
 description = "基于LoRA微调的多Agent协作话术生成系统"
 requires-python = ">=3.10"
 dependencies = [
@@ -39,6 +39,10 @@ monitoring = [
     "prometheus-client>=0.19.0",
     "opentelemetry-api>=1.21.0",
     "opentelemetry-sdk>=1.21.0",
+]
+retrieval = [
+    "elasticsearch>=8.12.0",
+    "sentence-transformers>=2.5.0",
 ]
 
 [project.scripts]

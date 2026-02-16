@@ -20,7 +20,7 @@ Orchestrator (`script_agent/agents/orchestrator.py`)
     +-- LangGraph State Graph
     |     CONTEXT_LOADING -> INTENT_RECOGNIZING
     |       -> (INTENT_CLARIFYING | SKILL_EXECUTING | PROFILE_FETCHING)
-    |       -> SCRIPT_GENERATING -> QUALITY_CHECKING -> COMPLETED/DEGRADED
+    |       -> PRODUCT_FETCHING -> SCRIPT_GENERATING -> QUALITY_CHECKING -> COMPLETED/DEGRADED
     |
     +-- Skills Router (`script_agent/skills/`)
     +-- Sub Agents (`script_agent/agents/*.py`)
@@ -28,6 +28,7 @@ Orchestrator (`script_agent/agents/orchestrator.py`)
 Persistence & Infra
     +-- Session Store (Memory/Redis/SQLite) (`script_agent/services/session_manager.py`)
     +-- Workflow Checkpoint Store (Memory/Redis/SQLite) (`script_agent/services/checkpoint_store.py`)
+    +-- Long-Term Memory Retrieval (`script_agent/services/long_term_memory.py`)
     +-- Observability Metrics (`script_agent/observability/metrics.py`)
     +-- LLM Client + Fallback (`script_agent/services/llm_client.py`)
 ```
@@ -76,6 +77,20 @@ Persistence & Infra
 - 支持同步与流式场景（流式在首段失败时切换）。
 - 可配置备用后端类型（vLLM/Ollama）和备用模型。
 
+### 6) 商品理解与长期记忆召回
+
+- 新增 `ProductAgent`，从商品名/卖点/特征构建商品画像，补齐“达人风格 + 商品卖点”联合生成场景。
+- 新增长期记忆检索服务：支持 embedding 向量化 + 向量检索（`memory`/`elasticsearch` 后端）。
+- 生成成功后自动写回长期记忆，后续请求可按租户、达人、品类、商品名做相似召回。
+
+### 7) 会话记忆规则裁剪与压缩落地
+
+- `SessionManager.save()` 增加 retention policy：
+  - 旧轮次规则压缩（保留意图槽位摘要与核心语义）
+  - 最大轮次裁剪（防止会话无限膨胀）
+  - 生成脚本列表裁剪
+- `ScriptGenerationAgent` 已接入 `SessionContextCompressor`，多轮场景会优先使用压缩会话记忆构建 Prompt。
+
 ## 核心模块与功能映射
 
 | 模块 | 文件 | 功能点 |
@@ -85,6 +100,7 @@ Persistence & Infra
 | 编排层 | `script_agent/agents/orchestrator.py` | LangGraph 图编排、状态推进、恢复续跑、去重缓存、checkpoint 写入 |
 | 意图识别 | `script_agent/agents/intent_agent.py` | 意图分类、槽位提取、指代/续写消解、澄清判断 |
 | 画像层 | `script_agent/agents/profile_agent.py` | 达人画像聚合、缓存利用、风格上下文补全 |
+| 商品层 | `script_agent/agents/product_agent.py` | 商品画像构建、卖点补全、长期记忆召回 |
 | 生成层 | `script_agent/agents/script_agent.py` | Prompt 构建、垂类话术生成、参数控制 |
 | 质检层 | `script_agent/agents/quality_agent.py` | 敏感词、合规、风格一致性校验与重试建议 |
 | Skill 扩展层 | `script_agent/skills/` | 意图到技能路由，支持生成/修改/批量等可插拔能力 |
@@ -93,6 +109,7 @@ Persistence & Infra
 | 并发控制层 | `script_agent/services/concurrency.py` | 本地锁/Redis 分布式会话锁、超时控制、统计 |
 | Checkpoint 层 | `script_agent/services/checkpoint_store.py` | 版本化 checkpoint、回放、审计、存储后端抽象 |
 | 限流层 | `script_agent/services/core_rate_limiter.py` | 租户维度 QPS + Token 双限流，支持 Redis 共享配额 |
+| 长期记忆层 | `script_agent/services/long_term_memory.py` | 向量化写回与检索召回（Memory/Elasticsearch） |
 | 可观测层 | `script_agent/observability/metrics.py` | 请求、延迟、锁超时、checkpoint 写入、缓存命中等指标 |
 | 配置层 | `script_agent/config/settings.py` | 环境变量集中配置，覆盖编排/锁/限流/checkpoint/LLM 主备 |
 
@@ -140,6 +157,12 @@ curl -X POST http://localhost:8080/api/v1/generate \
 | `CORE_RATE_TOKENS_PER_MIN` | `20000` | 租户分钟 token 配额 |
 | `LLM_FALLBACK_ENABLED` | `true` | 主模型失败后启用备用模型 |
 | `LLM_FALLBACK_BACKEND` | `ollama` | 备用后端类型：`ollama/vllm` |
+| `LONGTERM_MEMORY_ENABLED` | `true` | 启用长期记忆向量检索 |
+| `LONGTERM_MEMORY_BACKEND` | `memory` | 向量库后端：`memory/elasticsearch` |
+| `LONGTERM_MEMORY_TOP_K` | `3` | 检索召回条数 |
+| `LONGTERM_MEMORY_MIN_SIMILARITY` | `0.2` | 最低相似度阈值 |
+| `SESSION_MAX_TURNS_PERSISTED` | `30` | 会话持久化最大轮次 |
+| `SESSION_COMPRESS_ON_SAVE` | `true` | 保存会话时执行规则压缩 |
 | `LANGGRAPH_REQUIRED` | `false` | 是否强制要求 LangGraph 可用 |
 
 ## 快速启动
@@ -160,7 +183,7 @@ uvicorn script_agent.api.app:app --host 0.0.0.0 --port 8080 --workers 4
 
 ## 测试
 
-当前测试文件：`tests/test_agents.py`（31 个测试函数，覆盖模型、状态机、编排器、恢复/并发/限流等核心能力）。
+当前测试文件：`tests/test_agents.py`（35 个测试函数，覆盖模型、状态机、编排器、恢复/并发/限流、商品与长期记忆等核心能力）。
 
 ```bash
 python -m pytest tests/ -v
