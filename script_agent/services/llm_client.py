@@ -8,16 +8,140 @@
 aiohttp.ClientSession 在后端生命周期内复用, 避免每次请求创建新连接池。
 """
 
+import asyncio
+import hashlib
 import json
 import logging
+import random
+import time
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Dict, Optional
+from dataclasses import dataclass
+from typing import AsyncGenerator, Dict, Optional, Tuple
 
 import aiohttp
 
 from script_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+_FALLBACKABLE_HTTP_STATUS = _RETRYABLE_HTTP_STATUS.union({400, 404, 422})
+_NO_FALLBACK_HTTP_STATUS = {401, 403}
+
+
+class LLMCallError(RuntimeError):
+    """统一LLM调用错误模型，用于重试和fallback判定"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        fallback_eligible: bool,
+        status_code: Optional[int] = None,
+        backend_name: str = "",
+        category: str = "",
+    ):
+        super().__init__(message)
+        self.retryable = retryable
+        self.fallback_eligible = fallback_eligible
+        self.status_code = status_code
+        self.backend_name = backend_name
+        self.category = category
+
+
+class CircuitOpenError(LLMCallError):
+    """断路器开启时抛出"""
+
+    def __init__(self, backend_name: str):
+        super().__init__(
+            f"circuit open for backend={backend_name}",
+            retryable=False,
+            fallback_eligible=True,
+            backend_name=backend_name,
+        )
+
+
+@dataclass
+class _LayerPlan:
+    name: str
+    backend: "LLMBackend"
+    category: str
+    breaker: "CircuitBreaker"
+
+
+class CircuitBreaker:
+    """轻量异步断路器"""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        enabled: bool,
+        failure_threshold: int,
+        recovery_seconds: float,
+        half_open_max_calls: int,
+    ):
+        self.name = name
+        self.enabled = enabled
+        self.failure_threshold = max(1, failure_threshold)
+        self.recovery_seconds = max(1.0, recovery_seconds)
+        self.half_open_max_calls = max(1, half_open_max_calls)
+        self._lock = asyncio.Lock()
+        self._state = "closed"  # closed/open/half_open
+        self._failure_count = 0
+        self._opened_at = 0.0
+        self._half_open_inflight = 0
+
+    async def before_call(self):
+        if not self.enabled:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            if self._state == "open":
+                if now - self._opened_at >= self.recovery_seconds:
+                    self._state = "half_open"
+                    self._half_open_inflight = 0
+                else:
+                    raise CircuitOpenError(self.name)
+
+            if self._state == "half_open":
+                if self._half_open_inflight >= self.half_open_max_calls:
+                    raise CircuitOpenError(self.name)
+                self._half_open_inflight += 1
+
+    async def record_success(self):
+        if not self.enabled:
+            return
+        async with self._lock:
+            self._state = "closed"
+            self._failure_count = 0
+            self._opened_at = 0.0
+            self._half_open_inflight = 0
+
+    async def record_failure(self):
+        if not self.enabled:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            if self._state == "half_open":
+                self._state = "open"
+                self._opened_at = now
+                self._half_open_inflight = 0
+                self._failure_count = self.failure_threshold
+                return
+
+            self._failure_count += 1
+            if self._failure_count >= self.failure_threshold:
+                self._state = "open"
+                self._opened_at = now
+
+    async def release_half_open_slot(self):
+        if not self.enabled:
+            return
+        async with self._lock:
+            if self._state == "half_open" and self._half_open_inflight > 0:
+                self._half_open_inflight -= 1
 
 
 class LLMBackend(ABC):
@@ -29,12 +153,48 @@ class LLMBackend(ABC):
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp Session (懒初始化)"""
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=120, connect=10)
             connector = aiohttp.TCPConnector(limit=20, keepalive_timeout=30)
             self._session = aiohttp.ClientSession(
-                timeout=timeout, connector=connector,
+                timeout=aiohttp.ClientTimeout(total=None),
+                connector=connector,
             )
         return self._session
+
+    async def _ensure_success(self, resp: aiohttp.ClientResponse, backend_name: str):
+        if resp.status < 400:
+            return
+
+        detail = ""
+        try:
+            detail = (await resp.text())[:300]
+        except Exception:
+            detail = "<unreadable>"
+
+        retryable = resp.status in _RETRYABLE_HTTP_STATUS
+        fallback_eligible = (
+            resp.status in _FALLBACKABLE_HTTP_STATUS
+            and resp.status not in _NO_FALLBACK_HTTP_STATUS
+        )
+        try:
+            resp.raise_for_status()
+        except aiohttp.ClientResponseError as exc:
+            raise LLMCallError(
+                (
+                    f"{backend_name} request failed status={resp.status}, "
+                    f"message={detail}"
+                ),
+                retryable=retryable,
+                fallback_eligible=fallback_eligible,
+                status_code=resp.status,
+                backend_name=backend_name,
+            ) from exc
+        raise LLMCallError(
+            f"{backend_name} request failed status={resp.status}, message={detail}",
+            retryable=retryable,
+            fallback_eligible=fallback_eligible,
+            status_code=resp.status,
+            backend_name=backend_name,
+        )
 
     async def close(self):
         """关闭连接池"""
@@ -85,21 +245,36 @@ class VLLMBackend(LLMBackend):
             "top_p": kwargs.get("top_p", settings.llm.top_p),
             "stream": stream,
         }
+        timeout = kwargs.get("timeout")
+        headers = kwargs.get("headers")
 
         session = await self._get_session()
         async with session.post(
-            f"{self.base_url}/completions", json=payload,
+            f"{self.base_url}/completions",
+            json=payload,
+            timeout=timeout,
+            headers=headers,
         ) as resp:
+            await self._ensure_success(resp, "vllm")
             if stream:
                 async for line in resp.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: ") and line != "data: [DONE]":
-                        data = json.loads(line[6:])
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError as exc:
+                            raise LLMCallError(
+                                f"vllm stream payload decode failed: {exc}",
+                                retryable=True,
+                                fallback_eligible=True,
+                                backend_name="vllm",
+                                category=category,
+                            ) from exc
                         text = data.get("choices", [{}])[0].get("text", "")
                         if text:
                             yield text
             else:
-                data = await resp.json()
+                data = await resp.json(content_type=None)
                 yield data["choices"][0]["text"]
 
     async def generate_sync(self, prompt: str, category: str = "通用",
@@ -115,6 +290,7 @@ class VLLMBackend(LLMBackend):
         try:
             session = await self._get_session()
             async with session.get(f"{self.base_url}/models") as resp:
+                await self._ensure_success(resp, "vllm")
                 return {"status": "healthy", "models": await resp.json()}
         except Exception as e:
             return {"status": "unhealthy", "error": str(e)}
@@ -147,20 +323,35 @@ class OllamaBackend(LLMBackend):
                 "num_predict": kwargs.get("max_tokens", settings.llm.max_tokens),
             },
         }
+        timeout = kwargs.get("timeout")
+        headers = kwargs.get("headers")
 
         session = await self._get_session()
         async with session.post(
-            f"{self.base_url}/api/generate", json=payload,
+            f"{self.base_url}/api/generate",
+            json=payload,
+            timeout=timeout,
+            headers=headers,
         ) as resp:
+            await self._ensure_success(resp, "ollama")
             if stream:
                 async for line in resp.content:
                     if not line:
                         continue
-                    data = json.loads(line)
+                    try:
+                        data = json.loads(line.decode("utf-8"))
+                    except json.JSONDecodeError as exc:
+                        raise LLMCallError(
+                            f"ollama stream payload decode failed: {exc}",
+                            retryable=True,
+                            fallback_eligible=True,
+                            backend_name="ollama",
+                            category=category,
+                        ) from exc
                     if not data.get("done"):
                         yield data.get("response", "")
             else:
-                data = await resp.json()
+                data = await resp.json(content_type=None)
                 yield data.get("response", "")
 
     async def generate_sync(self, prompt: str, category: str = "通用",
@@ -176,6 +367,7 @@ class OllamaBackend(LLMBackend):
         try:
             session = await self._get_session()
             async with session.get(f"{self.base_url}/api/tags") as resp:
+                await self._ensure_success(resp, "ollama")
                 return {"status": "healthy", "models": await resp.json()}
         except Exception as e:
             return {"status": "unhealthy", "error": str(e)}
@@ -202,6 +394,31 @@ class LLMServiceClient:
                 model_map=settings.llm.ollama_model_map,
             )
         self._fallback_backend = self._build_fallback_backend()
+        self._retry_max_attempts = max(1, settings.llm.retry_max_attempts)
+        self._retry_base_delay_seconds = max(0.0, settings.llm.retry_base_delay_seconds)
+        self._retry_max_delay_seconds = max(
+            self._retry_base_delay_seconds, settings.llm.retry_max_delay_seconds
+        )
+        self._retry_jitter_seconds = max(0.0, settings.llm.retry_jitter_seconds)
+        self._idempotency_salt = settings.llm.idempotency_salt
+        self._sync_inflight_enabled = settings.llm.idempotency_inflight_enabled
+        self._sync_inflight: Dict[str, asyncio.Task[str]] = {}
+        self._sync_inflight_lock = asyncio.Lock()
+        self._primary_breaker = CircuitBreaker(
+            f"primary:{type(self.backend).__name__}",
+            enabled=settings.llm.circuit_breaker_enabled,
+            failure_threshold=settings.llm.circuit_breaker_failure_threshold,
+            recovery_seconds=settings.llm.circuit_breaker_recovery_seconds,
+            half_open_max_calls=settings.llm.circuit_breaker_half_open_max_calls,
+        )
+        self._fallback_breaker = CircuitBreaker(
+            f"fallback:{type(self._fallback_backend).__name__}"
+            if self._fallback_backend is not None else "fallback:none",
+            enabled=settings.llm.circuit_breaker_enabled,
+            failure_threshold=settings.llm.circuit_breaker_failure_threshold,
+            recovery_seconds=settings.llm.circuit_breaker_recovery_seconds,
+            half_open_max_calls=settings.llm.circuit_breaker_half_open_max_calls,
+        )
         logger.info(f"LLMServiceClient initialized with backend: {type(self.backend).__name__}")
 
     def _build_fallback_backend(self) -> Optional[LLMBackend]:
@@ -224,43 +441,377 @@ class LLMServiceClient:
         logger.warning("Unsupported fallback backend: %s", backend_type)
         return None
 
+    def _build_timeout(self, stream: bool, layer_index: int) -> aiohttp.ClientTimeout:
+        connect = settings.llm.timeout_connect_seconds
+        if stream:
+            total = settings.llm.timeout_total_stream_seconds
+            read = settings.llm.timeout_read_stream_seconds
+        else:
+            total = settings.llm.timeout_total_sync_seconds
+            read = settings.llm.timeout_read_sync_seconds
+
+        # fallback层使用更短超时，防止雪崩等待
+        if layer_index > 0:
+            total = max(connect + 1.0, total * settings.llm.fallback_timeout_factor)
+            read = max(1.0, read * settings.llm.fallback_timeout_factor)
+
+        return aiohttp.ClientTimeout(total=total, connect=connect, sock_read=read)
+
+    def _build_request_headers(
+        self,
+        idempotency_key: str,
+        layer_name: str,
+        attempt: int,
+        stream: bool,
+        request_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        headers = {
+            "Idempotency-Key": idempotency_key,
+            "X-LLM-Layer": layer_name,
+            "X-LLM-Attempt": str(attempt),
+            "X-LLM-Mode": "stream" if stream else "sync",
+        }
+        if request_id:
+            headers["X-Request-Id"] = request_id
+        return headers
+
+    def _resolve_idempotency_key(
+        self,
+        prompt: str,
+        category: str,
+        request_id: Optional[str],
+        explicit_key: Optional[str],
+    ) -> str:
+        if explicit_key:
+            return explicit_key
+        digest = hashlib.sha256(
+            f"{self._idempotency_salt}|{category}|{request_id or ''}|{prompt}".encode("utf-8")
+        ).hexdigest()
+        return digest[:40]
+
+    def _retry_delay(self, attempt: int) -> float:
+        delay = min(
+            self._retry_max_delay_seconds,
+            self._retry_base_delay_seconds * (2 ** max(0, attempt - 1)),
+        )
+        if self._retry_jitter_seconds > 0:
+            delay += random.uniform(0.0, self._retry_jitter_seconds)
+        return delay
+
+    def _classify_exception(
+        self, exc: Exception, backend_name: str, category: str
+    ) -> LLMCallError:
+        if isinstance(exc, LLMCallError):
+            if not exc.backend_name:
+                exc.backend_name = backend_name
+            if not exc.category:
+                exc.category = category
+            return exc
+        if isinstance(exc, asyncio.TimeoutError):
+            return LLMCallError(
+                f"timeout from backend={backend_name}",
+                retryable=True,
+                fallback_eligible=True,
+                backend_name=backend_name,
+                category=category,
+            )
+        if isinstance(exc, aiohttp.ClientConnectionError):
+            return LLMCallError(
+                f"connection error from backend={backend_name}: {exc}",
+                retryable=True,
+                fallback_eligible=True,
+                backend_name=backend_name,
+                category=category,
+            )
+        if isinstance(exc, aiohttp.ClientPayloadError):
+            return LLMCallError(
+                f"payload error from backend={backend_name}: {exc}",
+                retryable=True,
+                fallback_eligible=True,
+                backend_name=backend_name,
+                category=category,
+            )
+        if isinstance(exc, aiohttp.ClientResponseError):
+            status = exc.status
+            retryable = status in _RETRYABLE_HTTP_STATUS
+            fallback_eligible = (
+                status in _FALLBACKABLE_HTTP_STATUS and status not in _NO_FALLBACK_HTTP_STATUS
+            )
+            return LLMCallError(
+                f"http error from backend={backend_name}, status={status}",
+                retryable=retryable,
+                fallback_eligible=fallback_eligible,
+                status_code=status,
+                backend_name=backend_name,
+                category=category,
+            )
+        return LLMCallError(
+            f"unexpected llm error from backend={backend_name}: {exc}",
+            retryable=False,
+            fallback_eligible=False,
+            backend_name=backend_name,
+            category=category,
+        )
+
+    def _should_retry(self, err: LLMCallError, attempt: int) -> bool:
+        return err.retryable and attempt < self._retry_max_attempts
+
+    def _can_try_next_layer(self, err: LLMCallError) -> bool:
+        return err.fallback_eligible
+
+    def _build_layer_plans(self, category: str) -> Tuple[_LayerPlan, ...]:
+        layers = [
+            _LayerPlan(
+                name="primary",
+                backend=self.backend,
+                category=category,
+                breaker=self._primary_breaker,
+            )
+        ]
+        if settings.llm.fallback_to_general_enabled and category != "通用":
+            layers.append(
+                _LayerPlan(
+                    name="primary-general",
+                    backend=self.backend,
+                    category="通用",
+                    breaker=self._primary_breaker,
+                )
+            )
+        if self._fallback_backend is not None:
+            layers.append(
+                _LayerPlan(
+                    name="fallback-backend",
+                    backend=self._fallback_backend,
+                    category=category if settings.llm.fallback_keep_category else "通用",
+                    breaker=self._fallback_breaker,
+                )
+            )
+        return tuple(layers)
+
+    async def _run_sync_idempotent(
+        self, idempotency_key: str, coro_factory
+    ) -> str:
+        if not self._sync_inflight_enabled:
+            return await coro_factory()
+
+        owner = False
+        async with self._sync_inflight_lock:
+            fut = self._sync_inflight.get(idempotency_key)
+            if fut is None:
+                fut = asyncio.create_task(coro_factory())
+                self._sync_inflight[idempotency_key] = fut
+                owner = True
+
+        try:
+            return await fut
+        finally:
+            if owner:
+                async with self._sync_inflight_lock:
+                    self._sync_inflight.pop(idempotency_key, None)
+
+    async def _call_sync_with_layer(
+        self,
+        plan: _LayerPlan,
+        layer_index: int,
+        prompt: str,
+        max_tokens: int,
+        idempotency_key: str,
+        request_id: Optional[str],
+        kwargs: Dict,
+    ) -> str:
+        last_error: Optional[LLMCallError] = None
+        for attempt in range(1, self._retry_max_attempts + 1):
+            entered_breaker = False
+            try:
+                await plan.breaker.before_call()
+                entered_breaker = True
+                timeout = self._build_timeout(stream=False, layer_index=layer_index)
+                headers = self._build_request_headers(
+                    idempotency_key=idempotency_key,
+                    layer_name=plan.name,
+                    attempt=attempt,
+                    stream=False,
+                    request_id=request_id,
+                )
+                result = await plan.backend.generate_sync(
+                    prompt,
+                    plan.category,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                    headers=headers,
+                    idempotency_key=idempotency_key,
+                    request_id=request_id,
+                    **kwargs,
+                )
+                await plan.breaker.record_success()
+                return result
+            except Exception as exc:
+                err = self._classify_exception(exc, plan.name, plan.category)
+                last_error = err
+                if entered_breaker:
+                    await plan.breaker.record_failure()
+                if self._should_retry(err, attempt):
+                    await asyncio.sleep(self._retry_delay(attempt))
+                    continue
+                raise err
+            finally:
+                if entered_breaker:
+                    await plan.breaker.release_half_open_slot()
+        if last_error is None:
+            last_error = LLMCallError(
+                f"sync generation failed in unknown state for layer={plan.name}",
+                retryable=False,
+                fallback_eligible=False,
+                backend_name=plan.name,
+                category=plan.category,
+            )
+        raise last_error
+
+    async def _call_stream_with_layer(
+        self,
+        plan: _LayerPlan,
+        layer_index: int,
+        prompt: str,
+        idempotency_key: str,
+        request_id: Optional[str],
+        kwargs: Dict,
+    ) -> AsyncGenerator[str, None]:
+        for attempt in range(1, self._retry_max_attempts + 1):
+            entered_breaker = False
+            emitted = False
+            try:
+                await plan.breaker.before_call()
+                entered_breaker = True
+                timeout = self._build_timeout(stream=True, layer_index=layer_index)
+                headers = self._build_request_headers(
+                    idempotency_key=idempotency_key,
+                    layer_name=plan.name,
+                    attempt=attempt,
+                    stream=True,
+                    request_id=request_id,
+                )
+                async for token in plan.backend.generate(
+                    prompt,
+                    plan.category,
+                    True,
+                    timeout=timeout,
+                    headers=headers,
+                    idempotency_key=idempotency_key,
+                    request_id=request_id,
+                    **kwargs,
+                ):
+                    emitted = True
+                    yield token
+                await plan.breaker.record_success()
+                return
+            except Exception as exc:
+                err = self._classify_exception(exc, plan.name, plan.category)
+                if entered_breaker:
+                    await plan.breaker.record_failure()
+                if emitted:
+                    raise err
+                if self._should_retry(err, attempt):
+                    await asyncio.sleep(self._retry_delay(attempt))
+                    continue
+                raise err
+            finally:
+                if entered_breaker:
+                    await plan.breaker.release_half_open_slot()
+
     async def generate(self, prompt: str, category: str = "通用",
                        stream: bool = True,
                        **kwargs) -> AsyncGenerator[str, None]:
         """统一流式生成接口"""
-        emitted = False
-        try:
-            async for token in self.backend.generate(prompt, category, stream, **kwargs):
-                emitted = True
-                yield token
+        if not stream:
+            text = await self.generate_sync(prompt, category, **kwargs)
+            if text:
+                yield text
             return
-        except Exception as exc:
-            if emitted or self._fallback_backend is None:
-                raise
-            logger.warning("Primary LLM stream failed, fallback to backup model: %s", exc)
 
-        async for token in self._fallback_backend.generate(
-            prompt, "通用", stream, **kwargs
-        ):
-            yield token
+        request_id = kwargs.pop("request_id", None)
+        explicit_key = kwargs.pop("idempotency_key", None)
+        idempotency_key = self._resolve_idempotency_key(
+            prompt=prompt,
+            category=category,
+            request_id=request_id,
+            explicit_key=explicit_key,
+        )
+        plans = self._build_layer_plans(category)
+        last_error: Optional[LLMCallError] = None
+
+        for idx, plan in enumerate(plans):
+            layer_emitted = False
+            try:
+                async for token in self._call_stream_with_layer(
+                    plan=plan,
+                    layer_index=idx,
+                    prompt=prompt,
+                    idempotency_key=idempotency_key,
+                    request_id=request_id,
+                    kwargs=kwargs,
+                ):
+                    layer_emitted = True
+                    yield token
+                return
+            except LLMCallError as err:
+                last_error = err
+                if layer_emitted or not self._can_try_next_layer(err) or idx == len(plans) - 1:
+                    raise
+                logger.warning(
+                    "LLM stream layer failed, switch next layer. layer=%s category=%s err=%s",
+                    plan.name,
+                    plan.category,
+                    err,
+                )
+
+        if last_error is not None:
+            raise last_error
 
     async def generate_sync(self, prompt: str, category: str = "通用",
                             max_tokens: int = 1024, **kwargs) -> str:
         """统一同步生成接口"""
-        try:
-            return await self.backend.generate_sync(
-                prompt, category, max_tokens=max_tokens, **kwargs
-            )
-        except Exception as exc:
-            if self._fallback_backend is None:
-                raise
-            logger.warning(
-                "Primary LLM sync failed, fallback to backup model: %s",
-                exc,
-            )
-            return await self._fallback_backend.generate_sync(
-                prompt, "通用", max_tokens=max_tokens, **kwargs
-            )
+        request_id = kwargs.pop("request_id", None)
+        explicit_key = kwargs.pop("idempotency_key", None)
+        idempotency_key = self._resolve_idempotency_key(
+            prompt=prompt,
+            category=category,
+            request_id=request_id,
+            explicit_key=explicit_key,
+        )
+        plans = self._build_layer_plans(category)
+
+        async def _run_layers() -> str:
+            last_error: Optional[LLMCallError] = None
+            for idx, plan in enumerate(plans):
+                try:
+                    return await self._call_sync_with_layer(
+                        plan=plan,
+                        layer_index=idx,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        idempotency_key=idempotency_key,
+                        request_id=request_id,
+                        kwargs=kwargs,
+                    )
+                except LLMCallError as err:
+                    last_error = err
+                    if not self._can_try_next_layer(err) or idx == len(plans) - 1:
+                        raise
+                    logger.warning(
+                        "LLM sync layer failed, switch next layer. layer=%s category=%s err=%s",
+                        plan.name,
+                        plan.category,
+                        err,
+                    )
+            if last_error is None:
+                raise LLMCallError(
+                    "llm sync generation failed with unknown reason",
+                    retryable=False,
+                    fallback_eligible=False,
+                )
+            raise last_error
+
+        return await self._run_sync_idempotent(idempotency_key, _run_layers)
 
     async def health_check(self) -> Dict:
         return await self.backend.health_check()

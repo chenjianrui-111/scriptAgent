@@ -52,6 +52,58 @@ class LLMConfig:
     )
     fallback_model: str = os.getenv("LLM_FALLBACK_MODEL", "qwen:7b")
 
+    # 可靠性控制: 重试 / 超时 / 熔断 / 幂等
+    retry_max_attempts: int = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))
+    retry_base_delay_seconds: float = float(
+        os.getenv("LLM_RETRY_BASE_DELAY_SECONDS", "0.35")
+    )
+    retry_max_delay_seconds: float = float(
+        os.getenv("LLM_RETRY_MAX_DELAY_SECONDS", "2.0")
+    )
+    retry_jitter_seconds: float = float(
+        os.getenv("LLM_RETRY_JITTER_SECONDS", "0.2")
+    )
+    timeout_connect_seconds: float = float(
+        os.getenv("LLM_TIMEOUT_CONNECT_SECONDS", "5")
+    )
+    timeout_read_sync_seconds: float = float(
+        os.getenv("LLM_TIMEOUT_READ_SYNC_SECONDS", "25")
+    )
+    timeout_read_stream_seconds: float = float(
+        os.getenv("LLM_TIMEOUT_READ_STREAM_SECONDS", "90")
+    )
+    timeout_total_sync_seconds: float = float(
+        os.getenv("LLM_TIMEOUT_TOTAL_SYNC_SECONDS", "35")
+    )
+    timeout_total_stream_seconds: float = float(
+        os.getenv("LLM_TIMEOUT_TOTAL_STREAM_SECONDS", "120")
+    )
+    circuit_breaker_enabled: bool = (
+        os.getenv("LLM_CIRCUIT_BREAKER_ENABLED", "true").lower() == "true"
+    )
+    circuit_breaker_failure_threshold: int = int(
+        os.getenv("LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5")
+    )
+    circuit_breaker_recovery_seconds: float = float(
+        os.getenv("LLM_CIRCUIT_BREAKER_RECOVERY_SECONDS", "30")
+    )
+    circuit_breaker_half_open_max_calls: int = int(
+        os.getenv("LLM_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS", "1")
+    )
+    fallback_to_general_enabled: bool = (
+        os.getenv("LLM_FALLBACK_TO_GENERAL_ENABLED", "true").lower() == "true"
+    )
+    fallback_keep_category: bool = (
+        os.getenv("LLM_FALLBACK_KEEP_CATEGORY", "false").lower() == "true"
+    )
+    fallback_timeout_factor: float = float(
+        os.getenv("LLM_FALLBACK_TIMEOUT_FACTOR", "0.75")
+    )
+    idempotency_salt: str = os.getenv("LLM_IDEMPOTENCY_SALT", "script-agent-v1")
+    idempotency_inflight_enabled: bool = (
+        os.getenv("LLM_IDEMPOTENCY_INFLIGHT_ENABLED", "true").lower() == "true"
+    )
+
 
 @dataclass
 class IntentConfig:

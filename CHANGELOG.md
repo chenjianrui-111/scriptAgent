@@ -7,11 +7,21 @@
 
 ### Added
 
-- 待补充
+- `LLMServiceClient` 新增企业级可靠性控制层：
+  - 可重试错误与不可重试错误分类（HTTP/网络/超时/载荷解析）
+  - 分级超时（connect/read/total，区分 sync 与 stream）
+  - 断路器（closed/open/half-open）
+  - 请求幂等键透传（`Idempotency-Key`）和本地 in-flight 并发去重
+  - 分层 fallback 规则（primary -> primary-general -> fallback-backend）
+- 新增 `tests/test_llm_client_reliability.py`，覆盖重试、降级、幂等并发去重、断路器开启场景。
 
 ### Changed
 
-- 待补充
+- `script_agent/services/llm_client.py` 全面增强：
+  - vLLM/Ollama 请求统一补充状态检查与 `raise_for_status` 路径
+  - 流式与同步调用都支持重试+降级策略
+  - 健康检查改为显式校验 HTTP 成功状态
+- `script_agent/config/settings.py` 增加 `LLM_*` 可靠性配置项（重试、超时、断路器、fallback 策略、幂等）。
 
 ### Fixed
 
