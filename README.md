@@ -181,9 +181,23 @@ export VLLM_BASE_URL=http://vllm-service:8000/v1
 uvicorn script_agent.api.app:app --host 0.0.0.0 --port 8080 --workers 4
 ```
 
+## 前端交互页
+
+- 已内置前端控制台：`GET /`
+- 静态资源路径：`/web/*`
+- 主要能力：
+  - 创建会话（`/api/v1/sessions`）
+  - 同步生成（`/api/v1/generate`）
+  - 流式生成（`/api/v1/generate/stream`）
+  - 认证头透传（`X-Tenant-Id`/`X-Role`/`X-API-Key`/`Authorization`）
+
+本地启动后直接访问：`http://localhost:8080/`
+
 ## 测试
 
-当前测试文件：`tests/test_agents.py`（35 个测试函数，覆盖模型、状态机、编排器、恢复/并发/限流、商品与长期记忆等核心能力）。
+当前测试文件包括：
+- `tests/test_agents.py`（核心能力）
+- `tests/test_frontend_e2e.py`（前端页面可访问 + 生成链路端到端）
 
 ```bash
 python -m pytest tests/ -v

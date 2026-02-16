@@ -15,10 +15,12 @@ API层 - FastAPI应用
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from script_agent.agents.orchestrator import Orchestrator
@@ -62,6 +64,10 @@ app = FastAPI(
     version="1.2.0",
     lifespan=lifespan,
 )
+
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+if WEB_DIR.exists():
+    app.mount("/web", StaticFiles(directory=str(WEB_DIR)), name="web")
 
 # 全局单例
 orchestrator = Orchestrator()
@@ -155,6 +161,15 @@ async def _enforce_core_limits(
 # ===================================================================
 # Endpoints
 # ===================================================================
+
+
+@app.get("/", include_in_schema=False)
+async def frontend_home():
+    """前端交互页面"""
+    if not WEB_DIR.exists():
+        raise HTTPException(status_code=404, detail="frontend page not found")
+    return FileResponse(WEB_DIR / "index.html")
+
 
 @app.post("/api/v1/sessions", response_model=CreateSessionResponse)
 async def create_session(

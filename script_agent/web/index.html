@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Script Agent Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <div class="bg-blur bg-1" aria-hidden="true"></div>
+  <div class="bg-blur bg-2" aria-hidden="true"></div>
+
+  <main class="layout" id="script-agent-console">
+    <header class="hero">
+      <p class="eyebrow">SCRIPT AGENT</p>
+      <h1>企业话术交互控制台</h1>
+      <p class="subtitle">连接现有后端接口，完成会话创建、文案生成和流式输出。</p>
+    </header>
+
+    <section class="panel">
+      <h2>连接与认证</h2>
+      <div class="grid two">
+        <label>
+          API Base URL
+          <input id="baseUrl" placeholder="默认同源，例如 http://localhost:8080" />
+        </label>
+        <label>
+          Tenant ID
+          <input id="tenantId" value="tenant_dev" />
+        </label>
+        <label>
+          API Key
+          <input id="apiKey" placeholder="可选" />
+        </label>
+        <label>
+          Bearer Token
+          <input id="bearer" placeholder="可选" />
+        </label>
+        <label>
+          Role
+          <input id="role" value="admin" />
+        </label>
+      </div>
+      <p class="hint">开发模式默认可透传 <code>X-Tenant-Id</code> / <code>X-Role</code>。</p>
+    </section>
+
+    <section class="panel">
+      <h2>会话管理</h2>
+      <div class="grid three">
+        <label>
+          达人 ID
+          <input id="influencerId" placeholder="可选" />
+        </label>
+        <label>
+          达人名称
+          <input id="influencerName" value="小雅" />
+        </label>
+        <label>
+          品类
+          <input id="category" value="美妆" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="createSessionBtn" class="btn btn-primary">创建会话</button>
+      </div>
+      <label>
+        当前会话 ID
+        <input id="sessionId" placeholder="创建后自动填入，也可手动输入" />
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>生成话术</h2>
+      <label>
+        用户请求
+        <textarea id="query" rows="4" placeholder="例如：给我一段618美妆直播开场话术，语气热情一点"></textarea>
+      </label>
+      <div class="actions">
+        <button id="generateBtn" class="btn btn-primary">同步生成</button>
+        <button id="streamBtn" class="btn btn-secondary">流式生成</button>
+        <button id="stopStreamBtn" class="btn btn-ghost">停止流式</button>
+      </div>
+    </section>
+
+    <section class="panel result">
+      <div class="result-head">
+        <h2>输出结果</h2>
+        <span id="statusBadge" class="badge">待命</span>
+      </div>
+      <pre id="output" class="output"></pre>
+      <div id="meta" class="meta"></div>
+    </section>
+
+    <section class="panel">
+      <h2>交互日志</h2>
+      <ul id="logs" class="logs"></ul>
+    </section>
+  </main>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

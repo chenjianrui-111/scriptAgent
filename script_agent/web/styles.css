@@ -1,0 +1,272 @@
+:root {
+  --bg: #f4f7f6;
+  --panel: #ffffff;
+  --line: #d8dfdb;
+  --text: #1e2a27;
+  --muted: #5d6b67;
+  --primary: #0f7b6c;
+  --primary-strong: #08584d;
+  --accent: #f4a600;
+  --danger: #be3f3f;
+  --radius: 16px;
+  --shadow: 0 14px 40px rgba(15, 46, 40, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at 20% 10%, #e3f4ee 0%, transparent 38%),
+    radial-gradient(circle at 85% 20%, #fbeecf 0%, transparent 34%),
+    var(--bg);
+}
+
+.bg-blur {
+  position: fixed;
+  width: 320px;
+  height: 320px;
+  border-radius: 999px;
+  filter: blur(48px);
+  opacity: 0.32;
+  z-index: 0;
+}
+
+.bg-1 {
+  top: -80px;
+  right: -90px;
+  background: #4db6a7;
+}
+
+.bg-2 {
+  bottom: -120px;
+  left: -80px;
+  background: #ffcf66;
+}
+
+.layout {
+  position: relative;
+  z-index: 1;
+  width: min(1100px, 100% - 32px);
+  margin: 24px auto 40px;
+  display: grid;
+  gap: 14px;
+}
+
+.hero {
+  background: linear-gradient(135deg, #0e4d44 0%, #156e60 72%);
+  color: #f2fff9;
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow);
+  animation: rise-in 260ms ease-out;
+}
+
+.eyebrow {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  letter-spacing: 0.1em;
+  font-size: 12px;
+  color: #bbe8da;
+}
+
+.hero h1 {
+  margin: 6px 0 8px;
+  font-size: clamp(24px, 4.6vw, 36px);
+}
+
+.subtitle {
+  margin: 0;
+  color: #d8f6ee;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px;
+  box-shadow: 0 8px 22px rgba(30, 42, 39, 0.08);
+  animation: rise-in 260ms ease-out;
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.grid {
+  display: grid;
+  gap: 10px;
+}
+
+.grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text);
+  background: #fff;
+  transition: border-color 120ms ease;
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.btn {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: var(--primary-strong);
+}
+
+.btn-secondary {
+  background: #f0b72e;
+  color: #1a1a1a;
+}
+
+.btn-secondary:hover {
+  background: #dc9e10;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.result-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 12px;
+  color: #fff;
+  background: #445954;
+  padding: 4px 9px;
+  border-radius: 999px;
+}
+
+.output {
+  min-height: 170px;
+  max-height: 420px;
+  overflow: auto;
+  margin: 12px 0;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #dce2df;
+  background: #fafcfb;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.logs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.logs li {
+  background: #f9fbfa;
+  border: 1px solid #e3e8e6;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.logs time {
+  margin-right: 8px;
+  color: #7b8884;
+  font-family: "Space Grotesk", monospace;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 860px) {
+  .grid.two,
+  .grid.three {
+    grid-template-columns: 1fr;
+  }
+
+  .layout {
+    width: min(1100px, 100% - 18px);
+    margin-top: 14px;
+  }
+
+  .hero,
+  .panel {
+    padding: 14px;
+  }
+}
