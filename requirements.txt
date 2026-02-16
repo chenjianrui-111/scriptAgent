@@ -1,0 +1,27 @@
+# ===== Core =====
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+aiohttp>=3.9.0
+
+# ===== LLM / ML =====
+# transformers>=4.36.0      # DistilBERT/BERT 意图分类模型
+# torch>=2.1.0              # PyTorch (GPU推理)
+# peft>=0.7.0               # LoRA adapter管理
+# onnxruntime>=1.16.0       # ONNX Runtime (CPU推理优化)
+
+# ===== NLP =====
+jieba>=0.42.1               # 中文分词
+
+# ===== Cache / Storage =====
+# redis[hiredis]>=5.0.0     # Redis缓存
+# pymysql>=1.1.0            # MySQL持久化
+
+# ===== Monitoring =====
+# prometheus-client>=0.19.0 # Prometheus指标
+# opentelemetry-api>=1.21.0 # OpenTelemetry链路追踪
+
+# ===== Dev =====
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+httpx>=0.25.0               # 用于测试FastAPI

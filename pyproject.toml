@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "script-agent"
+version = "1.0.0"
+description = "基于LoRA微调的多Agent协作话术生成系统"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "aiohttp>=3.9.0",
+    "jieba>=0.42.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.25.0",
+]
+ml = [
+    "transformers>=4.36.0",
+    "torch>=2.1.0",
+    "peft>=0.7.0",
+    "onnxruntime>=1.16.0",
+    "scikit-learn>=1.3.0",
+]
+storage = [
+    "redis[hiredis]>=5.0.0",
+    "pymysql>=1.1.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.19.0",
+]
+monitoring = [
+    "prometheus-client>=0.19.0",
+    "opentelemetry-api>=1.21.0",
+    "opentelemetry-sdk>=1.21.0",
+]
+
+[project.scripts]
+script-agent = "script_agent.main:main"
+
+[tool.setuptools.packages.find]
+include = ["script_agent*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
