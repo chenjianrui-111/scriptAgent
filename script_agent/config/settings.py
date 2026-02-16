@@ -41,10 +41,24 @@ class LLMConfig:
     max_tokens: int = 1024
     stream: bool = True
 
+    # 失败降级备用模型 (例如千问/Qwen)
+    fallback_enabled: bool = (
+        os.getenv("LLM_FALLBACK_ENABLED", "true").lower() == "true"
+    )
+    fallback_backend: str = os.getenv("LLM_FALLBACK_BACKEND", "ollama")
+    fallback_base_url: str = os.getenv(
+        "LLM_FALLBACK_BASE_URL",
+        os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
+    fallback_model: str = os.getenv("LLM_FALLBACK_MODEL", "qwen:7b")
+
 
 @dataclass
 class IntentConfig:
     """意图识别配置"""
+    enable_ml_classifier: bool = (
+        os.getenv("INTENT_ENABLE_ML", "false").lower() == "true"
+    )
     # 分级阈值
     high_confidence_threshold: float = 0.85    # Level 1: 快速分类直接采用
     medium_confidence_threshold: float = 0.6   # Level 2: 全量模型验证
@@ -101,6 +115,60 @@ class CacheConfig:
 
 
 @dataclass
+class OrchestrationConfig:
+    """编排执行配置"""
+    session_lock_timeout_seconds: float = float(
+        os.getenv("SESSION_LOCK_TIMEOUT_SECONDS", "8")
+    )
+    checkpoint_auto_save: bool = (
+        os.getenv("WORKFLOW_CHECKPOINT_AUTO_SAVE", "true").lower() == "true"
+    )
+    langgraph_required: bool = (
+        os.getenv("LANGGRAPH_REQUIRED", "false").lower() == "true"
+    )
+    request_dedup_enabled: bool = (
+        os.getenv("REQUEST_DEDUP_ENABLED", "true").lower() == "true"
+    )
+    request_dedup_ttl_seconds: int = int(
+        os.getenv("REQUEST_DEDUP_TTL_SECONDS", "120")
+    )
+    checkpoint_script_max_chars: int = int(
+        os.getenv("CHECKPOINT_SCRIPT_MAX_CHARS", "4000")
+    )
+    distributed_lock_enabled: bool = (
+        os.getenv("DISTRIBUTED_LOCK_ENABLED", "true").lower() == "true"
+    )
+    distributed_lock_prefix: str = os.getenv(
+        "DISTRIBUTED_LOCK_PREFIX", "script_agent:lock:session:"
+    )
+    distributed_lock_lease_seconds: int = int(
+        os.getenv("DISTRIBUTED_LOCK_LEASE_SECONDS", "30")
+    )
+    distributed_lock_retry_interval_ms: int = int(
+        os.getenv("DISTRIBUTED_LOCK_RETRY_INTERVAL_MS", "120")
+    )
+
+
+@dataclass
+class CheckpointConfig:
+    """工作流checkpoint存储配置"""
+    store: str = os.getenv("CHECKPOINT_STORE", "memory").lower()
+    redis_prefix: str = os.getenv("CHECKPOINT_REDIS_PREFIX", "workflow:checkpoint:")
+    sqlite_path: str = os.getenv("CHECKPOINT_DB_PATH", "workflow_checkpoints.db")
+    history_limit: int = int(os.getenv("CHECKPOINT_HISTORY_LIMIT", "50"))
+
+
+@dataclass
+class CoreRateLimitConfig:
+    """核心接口限流 (QPS + Token)"""
+    enabled: bool = os.getenv("CORE_RATE_LIMIT_ENABLED", "true").lower() == "true"
+    backend: str = os.getenv("CORE_RATE_LIMIT_BACKEND", "local").lower()
+    qps_per_tenant: int = int(os.getenv("CORE_RATE_QPS_PER_TENANT", "8"))
+    tokens_per_minute: int = int(os.getenv("CORE_RATE_TOKENS_PER_MIN", "20000"))
+    redis_prefix: str = os.getenv("CORE_RATE_REDIS_PREFIX", "script_agent:rate:")
+
+
+@dataclass
 class AppConfig:
     """应用总配置"""
     app_name: str = "script_agent"
@@ -114,6 +182,9 @@ class AppConfig:
     context: ContextConfig = field(default_factory=ContextConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    core_rate_limit: CoreRateLimitConfig = field(default_factory=CoreRateLimitConfig)
 
 
 # 全局配置单例

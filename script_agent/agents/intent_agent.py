@@ -252,7 +252,13 @@ class IntentClassifier:
         self._vectorizer = None
         self._classifier = None
         self._keyword_fallback = self._build_keyword_weights()
-        self._try_init_ml()
+        if settings.intent.enable_ml_classifier:
+            self._try_init_ml()
+        else:
+            logger.info(
+                "IntentClassifier: ML mode disabled by INTENT_ENABLE_ML, "
+                "using weighted-keyword fallback."
+            )
 
     def _try_init_ml(self):
         """尝试加载 scikit-learn, 失败则降级为关键词匹配"""
@@ -279,6 +285,11 @@ class IntentClassifier:
         except ImportError:
             logger.info("IntentClassifier: Fallback mode (weighted keywords). "
                         "Install scikit-learn + jieba for ML classification.")
+        except Exception as e:  # pragma: no cover - 运行环境依赖异常降级
+            logger.warning(
+                "IntentClassifier: ML init failed (%s), fallback to keywords.",
+                e,
+            )
 
     def _build_keyword_weights(self) -> Dict[str, Dict[str, float]]:
         """加权关键词表 (降级方案, 比原始版本更精确)"""

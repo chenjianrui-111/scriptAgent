@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "script-agent"
-version = "1.0.0"
+version = "1.1.0"
 description = "基于LoRA微调的多Agent协作话术生成系统"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiohttp>=3.9.0",
     "jieba>=0.42.1",
+    "langgraph>=0.2.0",
 ]
 
 [project.optional-dependencies]

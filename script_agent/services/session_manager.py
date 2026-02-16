@@ -77,6 +77,8 @@ class SessionSerializer:
             },
             "generated_scripts": scripts,
             "current_state": session.current_state,
+            "state_history": session.state_history,
+            "workflow_snapshot": session.workflow_snapshot,
         }
 
     @staticmethod
@@ -130,6 +132,8 @@ class SessionSerializer:
             slot_context=slot_context,
             generated_scripts=scripts,
             current_state=data.get("current_state", "INIT"),
+            state_history=data.get("state_history", []),
+            workflow_snapshot=data.get("workflow_snapshot", {}),
         )
 
 

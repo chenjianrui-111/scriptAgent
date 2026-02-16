@@ -1,95 +1,189 @@
 """
-编排器 (Orchestrator) - 中央工作流协调器
+基于 LangGraph 的编排器
 
-编排器模式优势: 可观测性强、流程灵活、解耦彻底
-状态机驱动: INIT→INTENT→PROFILE→SCRIPT→QUALITY→COMPLETED
-支持: 条件分支、重试、降级、并行执行
+目标:
+  - 将原手工状态机编排升级为可声明式图编排
+  - 保留对外接口兼容 (handle_request / handle_stream)
+  - 提供会话级 checkpoint，支持中断后的快速恢复
 """
 
-import asyncio
-import uuid
-import time
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+import time
+import uuid
+from datetime import datetime
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, Optional, TypedDict
 
-from script_agent.agents.base import BaseAgent
 from script_agent.agents.intent_agent import IntentRecognitionAgent
 from script_agent.agents.profile_agent import ProfileAgent
-from script_agent.agents.script_agent import ScriptGenerationAgent
 from script_agent.agents.quality_agent import QualityCheckAgent
-from script_agent.models.message import (
-    AgentMessage, MessageType, IntentResult,
-    GeneratedScript, QualityResult,
-)
-from script_agent.models.state_machine import (
-    StateMachine, StateContext, WorkflowState,
-)
-from script_agent.models.context import (
-    SessionContext, InfluencerProfile,
-)
+from script_agent.agents.script_agent import ScriptGenerationAgent
 from script_agent.config.settings import settings
-from script_agent.skills.registry import SkillRegistry
-from script_agent.skills.base import SkillContext
+from script_agent.models.context import InfluencerProfile, SessionContext, StyleProfile
+from script_agent.models.message import (
+    AgentMessage,
+    GeneratedScript,
+    IntentResult,
+    MessageType,
+    QualityResult,
+)
+from script_agent.models.state_machine import WorkflowState
 from script_agent.observability import metrics as obs
+from script_agent.skills.base import SkillContext, SkillResult
+from script_agent.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
+try:
+    from langgraph.graph import END, START, StateGraph
+
+    LANGGRAPH_AVAILABLE = True
+except ImportError:  # pragma: no cover - 环境未安装时降级
+    END = "__end__"
+    START = "__start__"
+    StateGraph = None
+    LANGGRAPH_AVAILABLE = False
+
+
+CheckpointSaver = Callable[[SessionContext], Awaitable[None]]
+CheckpointLoader = Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
+CheckpointWriter = Callable[
+    [str, Dict[str, Any], str, str],
+    Awaitable[Optional[Dict[str, Any]]],
+]
+
+
+class OrchestrationState(TypedDict, total=False):
+    query: str
+    trace_id: str
+    session: SessionContext
+    checkpoint_saver: Optional[CheckpointSaver]
+    checkpoint_writer: Optional[CheckpointWriter]
+
+    workflow_start: float
+    timing: Dict[str, float]
+    state_history: list[str]
+    current_state: str
+
+    intent_result: IntentResult
+    profile: InfluencerProfile
+    script: GeneratedScript
+    quality_result: QualityResult
+    quality_feedback: list[str]
+    retry_count: int
+    should_retry: bool
+    needs_clarification: bool
+    skill_name: str
+    skill_result: SkillResult
+    request_recorded: bool
+
+    result: Dict[str, Any]
+    error: str
+
 
 class Orchestrator:
-    """
-    编排器 - 管理四个子Agent的协作流程 + Skill 路由
-
-    流程:
-      1. 意图识别 → 2. Skill 路由 (命中则走 Skill)
-         ↓ (未命中)
-      3. 画像获取 → 4. 话术生成 → 5. 质量校验
-    """
+    """中央编排器 (LangGraph)"""
 
     def __init__(self):
-        # 子Agents
         self.intent_agent = IntentRecognitionAgent()
         self.profile_agent = ProfileAgent()
         self.script_agent = ScriptGenerationAgent()
         self.quality_agent = QualityCheckAgent()
 
-        # 状态机
-        self.state_machine = StateMachine()
-
-        # Skill 系统
         self.skill_registry = SkillRegistry()
         self._register_default_skills()
 
+        self._graph = self._build_graph() if LANGGRAPH_AVAILABLE else None
+        if settings.orchestration.langgraph_required and self._graph is None:
+            raise RuntimeError(
+                "LANGGRAPH_REQUIRED=true, but langgraph is not installed"
+            )
+        if self._graph is None:
+            logger.warning(
+                "LangGraph not installed, orchestrator will run with sequential fallback"
+            )
+
     def _register_default_skills(self):
-        """注册内置 Skills"""
         try:
+            from script_agent.skills.builtin.batch_generate import BatchGenerateSkill
             from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
             from script_agent.skills.builtin.script_modify import ScriptModificationSkill
-            from script_agent.skills.builtin.batch_generate import BatchGenerateSkill
 
             self.skill_registry.register(ScriptGenerationSkill())
             self.skill_registry.register(ScriptModificationSkill())
             self.skill_registry.register(BatchGenerateSkill())
-        except Exception as e:
-            logger.warning(f"Failed to register default skills: {e}")
+        except Exception as exc:  # pragma: no cover - 防御分支
+            logger.warning(f"Failed to register default skills: {exc}")
 
-    async def handle_request(self, query: str,
-                              session: SessionContext,
-                              trace_id: Optional[str] = None
-                              ) -> Dict[str, Any]:
-        """
-        处理用户请求的完整流程
+    def _build_graph(self):
+        if not LANGGRAPH_AVAILABLE or StateGraph is None:
+            return None
 
-        Args:
-            query: 用户输入
-            session: 当前会话上下文
-            trace_id: 链路追踪ID
+        builder = StateGraph(OrchestrationState)
 
-        Returns:
-            包含生成结果、质量报告等的字典
-        """
+        builder.add_node("context_loading", self._node_context_loading)
+        builder.add_node("intent_recognizing", self._node_intent_recognizing)
+        builder.add_node("intent_clarifying", self._node_intent_clarifying)
+        builder.add_node("skill_executing", self._node_skill_executing)
+        builder.add_node("profile_fetching", self._node_profile_fetching)
+        builder.add_node("script_generating", self._node_script_generating)
+        builder.add_node("quality_checking", self._node_quality_checking)
+        builder.add_node("completed", self._node_completed)
+
+        builder.add_edge(START, "context_loading")
+        builder.add_edge("context_loading", "intent_recognizing")
+
+        builder.add_conditional_edges(
+            "intent_recognizing",
+            self._route_after_intent,
+            {
+                "intent_clarifying": "intent_clarifying",
+                "skill_executing": "skill_executing",
+                "profile_fetching": "profile_fetching",
+            },
+        )
+
+        builder.add_edge("intent_clarifying", "completed")
+        builder.add_edge("skill_executing", "completed")
+        builder.add_edge("profile_fetching", "script_generating")
+        builder.add_edge("script_generating", "quality_checking")
+
+        builder.add_conditional_edges(
+            "quality_checking",
+            self._route_after_quality,
+            {
+                "script_generating": "script_generating",
+                "completed": "completed",
+            },
+        )
+
+        builder.add_edge("completed", END)
+        return builder.compile()
+
+    async def handle_request(
+        self,
+        query: str,
+        session: SessionContext,
+        trace_id: Optional[str] = None,
+        checkpoint_saver: Optional[CheckpointSaver] = None,
+        checkpoint_loader: Optional[CheckpointLoader] = None,
+        checkpoint_writer: Optional[CheckpointWriter] = None,
+    ) -> Dict[str, Any]:
+        """处理用户请求主流程"""
         trace_id = trace_id or str(uuid.uuid4())
-        state_ctx = StateContext()
         workflow_start = time.perf_counter()
+
+        workflow_snapshot = await self._load_workflow_snapshot(
+            session=session,
+            checkpoint_loader=checkpoint_loader,
+        )
+
+        cached = self._build_cached_completed_result(
+            snapshot=workflow_snapshot,
+            query=query,
+            trace_id=trace_id,
+        )
+        if cached is not None:
+            return cached
 
         result: Dict[str, Any] = {
             "trace_id": trace_id,
@@ -102,21 +196,108 @@ class Orchestrator:
             "timing": {},
         }
 
+        initial_state: OrchestrationState = {
+            "query": query,
+            "trace_id": trace_id,
+            "session": session,
+            "checkpoint_saver": checkpoint_saver,
+            "checkpoint_writer": checkpoint_writer,
+            "workflow_start": workflow_start,
+            "timing": {},
+            "state_history": [],
+            "current_state": WorkflowState.INIT.value,
+            "retry_count": 0,
+            "should_retry": False,
+            "request_recorded": False,
+            "result": result,
+        }
+        initial_state.update(self._build_resume_seed(query, workflow_snapshot))
+
         try:
-            # ============================================================
-            # Step 1: INIT → CONTEXT_LOADING
-            # ============================================================
-            self.state_machine.transition(state_ctx, {})
-            t0 = time.perf_counter()
-            # 会话已在外部加载, 这里仅做标记
-            result["timing"]["context_loading"] = (time.perf_counter() - t0) * 1000
+            if self._graph is not None:
+                final_state = await self._graph.ainvoke(initial_state)
+            else:
+                final_state = await self._run_without_langgraph(initial_state)
+            return final_state.get("result", result)
+        except Exception as exc:
+            logger.error(f"[{trace_id}] Orchestrator error: {exc}", exc_info=True)
+            result["error"] = str(exc)
+            intent = initial_state.get("intent_result")
+            obs.record_request(
+                intent.intent if intent else "unknown",
+                "error",
+                initial_state.get("skill_name", "default"),
+            )
+            result["timing"]["total"] = (time.perf_counter() - workflow_start) * 1000
+            result["state_history"] = list(session.state_history)
+            await self._write_checkpoint(
+                {
+                    **initial_state,
+                    "current_state": WorkflowState.ERROR.value,
+                    "error": str(exc),
+                },
+                status="failed",
+            )
+            return result
 
-            # ============================================================
-            # Step 2: CONTEXT_LOADING → INTENT_RECOGNIZING
-            # ============================================================
-            self.state_machine.transition(state_ctx, {})
-            t0 = time.perf_counter()
+    async def _run_without_langgraph(
+        self,
+        state: OrchestrationState,
+    ) -> OrchestrationState:
+        """当 langgraph 不可用时的兼容执行路径"""
+        state.update(await self._node_context_loading(state))
+        state.update(await self._node_intent_recognizing(state))
 
+        route = self._route_after_intent(state)
+        if route == "intent_clarifying":
+            state.update(await self._node_intent_clarifying(state))
+            state.update(await self._node_completed(state))
+            return state
+
+        if route == "skill_executing":
+            state.update(await self._node_skill_executing(state))
+            state.update(await self._node_completed(state))
+            return state
+
+        state.update(await self._node_profile_fetching(state))
+        while True:
+            state.update(await self._node_script_generating(state))
+            state.update(await self._node_quality_checking(state))
+            if self._route_after_quality(state) == "completed":
+                break
+        state.update(await self._node_completed(state))
+        return state
+
+    async def _node_context_loading(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.CONTEXT_LOADING)
+        timing = dict(state.get("timing", {}))
+        timing["context_loading"] = (time.perf_counter() - t0) * 1000
+
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
+
+    async def _node_intent_recognizing(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.INTENT_RECOGNIZING)
+
+        session = state["session"]
+        query = state["query"]
+        trace_id = state["trace_id"]
+
+        intent_result = state.get("intent_result")
+        if intent_result is None:
             intent_msg = AgentMessage(
                 trace_id=trace_id,
                 payload={"query": query, "session": session},
@@ -124,166 +305,295 @@ class Orchestrator:
                 tenant_id=session.tenant_id,
             )
             intent_response = await self.intent_agent(intent_msg)
-            intent_result: IntentResult = intent_response.payload.get(
+            self._raise_if_agent_error(intent_response, "intent_recognition")
+            intent_result = intent_response.payload.get(
                 "intent_result", IntentResult(intent="unknown", confidence=0.0)
             )
 
-            result["timing"]["intent_recognition"] = (time.perf_counter() - t0) * 1000
-            obs.record_intent_confidence(intent_result.intent, intent_result.confidence)
-            logger.info(
-                f"[{trace_id}] Intent: {intent_result.intent} "
-                f"confidence={intent_result.confidence:.2f}"
-            )
+        timing = dict(state.get("timing", {}))
+        timing["intent_recognition"] = (time.perf_counter() - t0) * 1000
 
-            # ============================================================
-            # Step 3: 意图分支判断
-            # ============================================================
-            conditions = {
-                "confidence": intent_result.confidence,
-                "intent": intent_result.intent,
-            }
-            next_state = self.state_machine.transition(state_ctx, conditions)
+        obs.record_intent_confidence(intent_result.intent, intent_result.confidence)
+        logger.info(
+            f"[{trace_id}] Intent: {intent_result.intent} confidence={intent_result.confidence:.2f}"
+        )
 
-            # 如果需要澄清 → 返回澄清问题
-            if (intent_result.needs_clarification
-                    or next_state == WorkflowState.INTENT_CLARIFYING):
-                result["clarification_needed"] = True
-                result["clarification_question"] = (
-                    intent_result.clarification_question
-                    or "请提供更多信息以便生成话术"
-                )
-                result["state_history"] = [s.value for s in state_ctx.state_history]
-                return result
-
-            # ============================================================
-            # Step 3.5: Skill 路由 (命中则走 Skill 快速通道)
-            # ============================================================
-            slots = intent_result.slots
-            skill = self.skill_registry.route(intent_result.intent, slots)
-
+        skill_name = ""
+        if not intent_result.needs_clarification:
+            skill = self.skill_registry.route(intent_result.intent, intent_result.slots)
             if skill:
-                t0 = time.perf_counter()
-                # Skill 需要画像, 先获取
-                profile = await self.profile_agent.fetch(slots)
-                skill_ctx = SkillContext(
-                    intent=intent_result,
-                    profile=profile,
-                    session=session,
-                    trace_id=trace_id,
-                )
-                skill_result = await skill.execute(skill_ctx)
-                result["timing"]["skill_execution"] = (time.perf_counter() - t0) * 1000
-                result["success"] = skill_result.success
-                result["script"] = skill_result.script
-                result["quality_result"] = skill_result.quality_result
-                result["intent"] = intent_result
-                result["skill_used"] = skill.name
-                obs.record_skill_hit(skill.name)
-                obs.record_request(intent_result.intent, "success" if skill_result.success else "error", skill.name)
-                if skill_result.script:
-                    session.add_turn(
-                        user_message=query,
-                        assistant_message=skill_result.script.content,
-                        intent=intent_result,
-                        generated_script=skill_result.script.content,
-                    )
-                    session.generated_scripts.append(skill_result.script)
-                result["timing"]["total"] = (time.perf_counter() - workflow_start) * 1000
-                result["state_history"] = [s.value for s in state_ctx.state_history]
-                return result
+                skill_name = skill.name
 
-            # ============================================================
-            # Step 4: PROFILE_FETCHING (默认流程, 无 Skill 匹配)
-            # ============================================================
-            t0 = time.perf_counter()
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "intent_result": intent_result,
+            "skill_name": skill_name,
+            "needs_clarification": bool(intent_result.needs_clarification),
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
 
+    def _route_after_intent(self, state: OrchestrationState) -> str:
+        intent_result = state.get("intent_result")
+        if not intent_result:
+            return "intent_clarifying"
+        if intent_result.needs_clarification:
+            return "intent_clarifying"
+        if state.get("skill_name"):
+            return "skill_executing"
+        return "profile_fetching"
+
+    async def _node_intent_clarifying(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        history, current_state = self._move_state(state, WorkflowState.INTENT_CLARIFYING)
+        intent_result = state.get("intent_result", IntentResult(intent="unknown", confidence=0.0))
+
+        result = dict(state.get("result", {}))
+        result["clarification_needed"] = True
+        result["clarification_question"] = (
+            intent_result.clarification_question or "请提供更多信息以便生成话术"
+        )
+
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "result": result,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
+
+    async def _node_skill_executing(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.SCRIPT_GENERATING)
+
+        session = state["session"]
+        trace_id = state["trace_id"]
+        query = state["query"]
+        intent_result = state.get("intent_result", IntentResult(intent="unknown", confidence=0.0))
+
+        skill_name = state.get("skill_name", "")
+        skill = self.skill_registry.get(skill_name)
+        if skill is None:
+            raise RuntimeError(f"skill not found: {skill_name}")
+
+        profile = state.get("profile")
+        if profile is None:
+            profile = await self.profile_agent.fetch(intent_result.slots)
+
+        skill_ctx = SkillContext(
+            intent=intent_result,
+            profile=profile,
+            session=session,
+            trace_id=trace_id,
+        )
+        skill_result = await skill.execute(skill_ctx)
+
+        timing = dict(state.get("timing", {}))
+        timing["skill_execution"] = (time.perf_counter() - t0) * 1000
+
+        result = dict(state.get("result", {}))
+        result["success"] = bool(skill_result.success)
+        result["script"] = skill_result.script
+        result["quality_result"] = skill_result.quality_result
+        result["intent"] = intent_result
+        result["skill_used"] = skill_name
+
+        if skill_result.script:
+            session.add_turn(
+                user_message=query,
+                assistant_message=skill_result.script.content,
+                intent=intent_result,
+                generated_script=skill_result.script.content,
+            )
+            session.generated_scripts.append(skill_result.script)
+
+        obs.record_skill_hit(skill_name)
+
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "profile": profile,
+            "skill_result": skill_result,
+            "result": result,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
+
+    async def _node_profile_fetching(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.PROFILE_FETCHING)
+
+        session = state["session"]
+        intent_result = state.get("intent_result", IntentResult(intent="unknown", confidence=0.0))
+        slots = intent_result.slots
+
+        profile = state.get("profile")
+        if profile is None:
             profile_msg = AgentMessage(
-                trace_id=trace_id,
+                trace_id=state["trace_id"],
                 payload={"slots": slots},
                 session_id=session.session_id,
             )
             profile_response = await self.profile_agent(profile_msg)
-            profile: InfluencerProfile = profile_response.payload.get(
-                "profile", InfluencerProfile()
+            self._raise_if_agent_error(profile_response, "profile")
+            profile = profile_response.payload.get("profile", InfluencerProfile())
+
+        timing = dict(state.get("timing", {}))
+        timing["profile_fetching"] = (time.perf_counter() - t0) * 1000
+
+        if slots.get("target_name"):
+            session.entity_cache.update(
+                "influencer",
+                profile.influencer_id,
+                slots["target_name"],
             )
+        session.slot_context.update(intent_result.intent, slots)
 
-            result["timing"]["profile_fetching"] = (time.perf_counter() - t0) * 1000
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "profile": profile,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
 
-            # 更新Entity缓存 (供后续轮次指代消解)
-            if slots.get("target_name"):
-                session.entity_cache.update(
-                    "influencer",
-                    profile.influencer_id,
-                    slots["target_name"],
-                )
-            session.slot_context.update(intent_result.intent, slots)
+    async def _node_script_generating(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.SCRIPT_GENERATING)
 
-            # ============================================================
-            # Step 5: SCRIPT_GENERATING
-            # ============================================================
-            self.state_machine.transition(state_ctx, {"confidence": 1.0})
-            t0 = time.perf_counter()
+        session = state["session"]
+        intent_result = state.get("intent_result", IntentResult(intent="unknown", confidence=0.0))
+        profile = state.get("profile", InfluencerProfile())
 
+        should_reuse_script = bool(state.get("script")) and bool(
+            state.get("quality_result") is None and state.get("retry_count", 0) == 0
+        )
+        if should_reuse_script:
+            script = state["script"]
+        else:
+            payload = {
+                "slots": intent_result.slots,
+                "profile": profile,
+                "session": session,
+            }
+            if state.get("quality_feedback"):
+                payload["feedback"] = state["quality_feedback"]
             script_msg = AgentMessage(
-                trace_id=trace_id,
-                payload={
-                    "slots": slots,
-                    "profile": profile,
-                    "session": session,
-                },
+                trace_id=state["trace_id"],
+                payload=payload,
                 session_id=session.session_id,
             )
             script_response = await self.script_agent(script_msg)
-            script: GeneratedScript = script_response.payload.get(
-                "script", GeneratedScript()
-            )
+            self._raise_if_agent_error(script_response, "script_generation")
+            script = script_response.payload.get("script", GeneratedScript())
 
-            result["timing"]["script_generation"] = (time.perf_counter() - t0) * 1000
+        timing = dict(state.get("timing", {}))
+        timing["script_generation"] = (time.perf_counter() - t0) * 1000
 
-            # ============================================================
-            # Step 6: QUALITY_CHECKING (支持重试)
-            # ============================================================
-            self.state_machine.transition(state_ctx, {})
-            t0 = time.perf_counter()
-            retry_count = 0
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "script": script,
+            "quality_result": None,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
 
-            while retry_count <= settings.quality.max_retries:
-                quality_msg = AgentMessage(
-                    trace_id=trace_id,
-                    payload={"script": script, "profile": profile},
-                    session_id=session.session_id,
-                )
-                quality_response = await self.quality_agent(quality_msg)
-                quality_result: QualityResult = quality_response.payload.get(
-                    "quality_result", QualityResult()
-                )
+    async def _node_quality_checking(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        history, current_state = self._move_state(state, WorkflowState.QUALITY_CHECKING)
 
-                if quality_result.passed:
-                    break
+        session = state["session"]
+        script = state.get("script", GeneratedScript())
+        profile = state.get("profile", InfluencerProfile())
 
-                retry_count += 1
-                if retry_count <= settings.quality.max_retries:
-                    logger.info(
-                        f"[{trace_id}] Quality check failed, retry {retry_count}"
-                    )
-                    # 带反馈重新生成
-                    script_msg.payload["feedback"] = quality_result.suggestions
-                    script_response = await self.script_agent(script_msg)
-                    script = script_response.payload.get("script", script)
+        quality_msg = AgentMessage(
+            trace_id=state["trace_id"],
+            payload={"script": script, "profile": profile},
+            session_id=session.session_id,
+        )
+        quality_response = await self.quality_agent(quality_msg)
+        self._raise_if_agent_error(quality_response, "quality_check")
+        quality_result = quality_response.payload.get("quality_result", QualityResult())
 
-            result["timing"]["quality_check"] = (time.perf_counter() - t0) * 1000
+        retry_count = int(state.get("retry_count", 0))
+        should_retry = False
+        quality_feedback: list[str] = []
 
-            # ============================================================
-            # Step 7: COMPLETED
-            # ============================================================
-            conditions = {
-                "quality_passed": quality_result.passed,
-                "retry_count": retry_count,
-                "max_retries": settings.quality.max_retries,
-            }
-            self.state_machine.transition(state_ctx, conditions)
+        if quality_result.passed:
+            should_retry = False
+        else:
+            retry_count += 1
+            quality_feedback = list(quality_result.suggestions)
+            should_retry = retry_count <= settings.quality.max_retries
+            if should_retry:
+                logger.info(f"[{state['trace_id']}] Quality check failed, retry {retry_count}")
 
-            # 更新会话
+        timing = dict(state.get("timing", {}))
+        timing["quality_check"] = (time.perf_counter() - t0) * 1000
+
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "quality_result": quality_result,
+            "retry_count": retry_count,
+            "should_retry": should_retry,
+            "quality_feedback": quality_feedback,
+        }
+        await self._write_checkpoint({**state, **updates}, status="in_progress")
+        return updates
+
+    def _route_after_quality(self, state: OrchestrationState) -> str:
+        quality_result = state.get("quality_result")
+        if quality_result and quality_result.passed:
+            return "completed"
+        if state.get("should_retry"):
+            return "script_generating"
+        return "completed"
+
+    async def _node_completed(
+        self,
+        state: OrchestrationState,
+    ) -> Dict[str, Any]:
+        session = state["session"]
+        query = state["query"]
+        timing = dict(state.get("timing", {}))
+
+        result = dict(state.get("result", {}))
+        intent_result = state.get("intent_result")
+        profile = state.get("profile")
+        script = state.get("script")
+        quality_result = state.get("quality_result")
+
+        final_state = WorkflowState.COMPLETED
+        if state.get("needs_clarification"):
+            final_state = WorkflowState.INTENT_CLARIFYING
+        elif quality_result and not quality_result.passed and not state.get("should_retry"):
+            final_state = WorkflowState.DEGRADED
+
+        history, current_state = self._move_state(state, final_state)
+
+        if script and not state.get("skill_result") and not state.get("needs_clarification"):
             session.add_turn(
                 user_message=query,
                 assistant_message=script.content,
@@ -292,50 +602,420 @@ class Orchestrator:
             )
             session.generated_scripts.append(script)
 
-            # 构建结果
-            result["success"] = True
+        success = bool(result.get("success", False))
+        if state.get("skill_result") is not None:
+            success = bool(result.get("success", False))
+        elif quality_result is not None:
+            success = bool(quality_result.passed)
+        elif script:
+            success = True
+
+        if script:
             result["script"] = script
             result["quality_result"] = quality_result
+        result["success"] = success
+        if intent_result:
             result["intent"] = intent_result
+        if profile:
             result["profile_name"] = profile.name
 
-        except Exception as e:
-            logger.error(f"[{trace_id}] Orchestrator error: {e}", exc_info=True)
-            result["error"] = str(e)
-            state_ctx.current_state = WorkflowState.ERROR
+        timing["total"] = (time.perf_counter() - state["workflow_start"]) * 1000
+        result["timing"] = timing
+        result["state_history"] = list(history)
 
-        # 记录总耗时
-        result["timing"]["total"] = (time.perf_counter() - workflow_start) * 1000
-        result["state_history"] = [s.value for s in state_ctx.state_history] + [
-            state_ctx.current_state.value
-        ]
+        if not state.get("request_recorded"):
+            obs.record_request(
+                intent_result.intent if intent_result else "unknown",
+                "success" if result.get("success") else "error",
+                result.get("skill_used", "default"),
+            )
+
+        updates = {
+            "state_history": history,
+            "current_state": current_state,
+            "timing": timing,
+            "result": result,
+            "request_recorded": True,
+        }
+        status = "completed" if result.get("success") else "failed"
+        await self._write_checkpoint({**state, **updates}, status=status)
+        return updates
+
+    def _move_state(
+        self,
+        state: OrchestrationState,
+        new_state: WorkflowState,
+    ) -> tuple[list[str], str]:
+        history = list(state.get("state_history", []))
+        if not history or history[-1] != new_state.value:
+            history.append(new_state.value)
+
+        session = state["session"]
+        session.current_state = new_state.value
+        session.state_history = history
+
+        return history, new_state.value
+
+    async def _load_workflow_snapshot(
+        self,
+        session: SessionContext,
+        checkpoint_loader: Optional[CheckpointLoader],
+    ) -> Dict[str, Any]:
+        if checkpoint_loader is not None:
+            try:
+                loaded = await checkpoint_loader(session.session_id)
+                if isinstance(loaded, dict):
+                    return loaded
+            except Exception as exc:
+                logger.warning("Failed to load checkpoint for %s: %s", session.session_id, exc)
+        return session.workflow_snapshot or {}
+
+    def _build_cached_completed_result(
+        self,
+        snapshot: Dict[str, Any],
+        query: str,
+        trace_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """同 query 的完成态请求快速返回，避免重复调用下游模型"""
+        if not settings.orchestration.request_dedup_enabled:
+            return None
+
+        if snapshot.get("status") != "completed":
+            return None
+        if snapshot.get("last_query") != query:
+            return None
+        if not self._is_snapshot_fresh(snapshot):
+            return None
+
+        script = self._to_script(snapshot.get("script"))
+        if script is None:
+            return None
+        quality = self._to_quality(snapshot.get("quality_result"))
+        intent = self._to_intent_result(snapshot.get("intent"))
+
+        result: Dict[str, Any] = {
+            "trace_id": trace_id,
+            "success": True if quality is None else bool(quality.passed),
+            "script": script,
+            "quality_result": quality,
+            "clarification_needed": False,
+            "clarification_question": "",
+            "state_history": list(snapshot.get("state_history", [])),
+            "timing": {"total": 0.0, "cache_hit": 0.0},
+            "from_cache": True,
+        }
+        if intent:
+            result["intent"] = intent
+        obs.record_workflow_cache_hit()
+        obs.record_request(
+            intent.intent if intent else "unknown",
+            "success" if result["success"] else "error",
+            "dedup_cache",
+        )
         return result
 
-    async def handle_stream(self, query: str,
-                             session: SessionContext,
-                             ) -> AsyncGenerator[str, None]:
+    def _is_snapshot_fresh(self, snapshot: Dict[str, Any]) -> bool:
+        ts = snapshot.get("updated_at")
+        if not isinstance(ts, str):
+            return False
+        try:
+            updated_at = datetime.fromisoformat(ts)
+        except ValueError:
+            return False
+        age = (datetime.now() - updated_at).total_seconds()
+        return age <= settings.orchestration.request_dedup_ttl_seconds
+
+    def _to_intent_result(self, data: Any) -> Optional[IntentResult]:
+        if not isinstance(data, dict):
+            return None
+        return IntentResult(
+            intent=data.get("intent", "unknown"),
+            confidence=float(data.get("confidence", 0.0)),
+            slots=dict(data.get("slots", {})),
+            needs_clarification=bool(data.get("needs_clarification", False)),
+            clarification_question=data.get("clarification_question", ""),
+        )
+
+    def _to_profile(self, data: Any) -> Optional[InfluencerProfile]:
+        if not isinstance(data, dict):
+            return None
+        style_data = data.get("style", {})
+        return InfluencerProfile(
+            influencer_id=data.get("influencer_id", ""),
+            name=data.get("name", ""),
+            category=data.get("category", ""),
+            audience_age_range=data.get("audience_age_range", ""),
+            audience_gender_ratio=data.get("audience_gender_ratio", ""),
+            top_content_keywords=list(data.get("top_content_keywords", [])),
+            style=StyleProfile(
+                tone=style_data.get("tone", ""),
+                formality_level=float(style_data.get("formality_level", 0.5)),
+                catchphrases=list(style_data.get("catchphrases", [])),
+                avg_sentence_length=float(style_data.get("avg_sentence_length", 20.0)),
+                interaction_frequency=float(style_data.get("interaction_frequency", 0.5)),
+                humor_level=float(style_data.get("humor_level", 0.3)),
+            ),
+        )
+
+    def _to_script(self, data: Any) -> Optional[GeneratedScript]:
+        if not isinstance(data, dict):
+            return None
+        if data.get("content_truncated"):
+            # 截断快照不参与恢复，避免半内容污染结果
+            return None
+        return GeneratedScript(
+            script_id=data.get("script_id") or str(uuid.uuid4()),
+            content=data.get("content", ""),
+            category=data.get("category", ""),
+            scenario=data.get("scenario", ""),
+            style_keywords=list(data.get("style_keywords", [])),
+            turn_index=int(data.get("turn_index", 0)),
+            adopted=bool(data.get("adopted", False)),
+            quality_score=float(data.get("quality_score", 0.0)),
+            generation_params=dict(data.get("generation_params", {})),
+        )
+
+    def _to_quality(self, data: Any) -> Optional[QualityResult]:
+        if not isinstance(data, dict):
+            return None
+        return QualityResult(
+            passed=bool(data.get("passed", False)),
+            overall_score=float(data.get("overall_score", 0.0)),
+            sensitive_words=list(data.get("sensitive_words", [])),
+            compliance_issues=list(data.get("compliance_issues", [])),
+            style_consistency=float(data.get("style_consistency", 0.0)),
+            suggestions=list(data.get("suggestions", [])),
+        )
+
+    def _raise_if_agent_error(self, response: AgentMessage, agent_name: str) -> None:
+        if response.message_type != MessageType.ERROR:
+            return
+        error_msg = response.payload.get("error_message", "unknown error")
+        raise RuntimeError(f"{agent_name} failed: {error_msg}")
+
+    def _build_resume_seed(self, query: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """从持久化快照恢复可复用状态（同 query）"""
+        if snapshot.get("last_query") != query:
+            return {}
+        if snapshot.get("status") not in {"in_progress", "failed"}:
+            return {}
+        if snapshot.get("status") == "in_progress" and not self._is_snapshot_fresh(snapshot):
+            return {}
+
+        seed: Dict[str, Any] = {}
+
+        intent = self._to_intent_result(snapshot.get("intent"))
+        if intent:
+            seed["intent_result"] = intent
+
+        profile = self._to_profile(snapshot.get("profile"))
+        if profile:
+            seed["profile"] = profile
+
+        script = self._to_script(snapshot.get("script"))
+        if script:
+            seed["script"] = script
+
+        quality = self._to_quality(snapshot.get("quality_result"))
+        if quality:
+            seed["quality_result"] = quality
+
+        if "retry_count" in snapshot:
+            seed["retry_count"] = int(snapshot.get("retry_count", 0))
+
+        logger.info(
+            "Recovered workflow snapshot state=%s",
+            snapshot.get("current_state", ""),
+        )
+        return seed
+
+    async def _write_checkpoint(
+        self,
+        state: OrchestrationState,
+        status: str,
+    ) -> None:
+        """将编排快照写入 session，必要时自动持久化"""
+        session = state["session"]
+        intent = state.get("intent_result")
+        profile = state.get("profile")
+        script = state.get("script")
+        quality_result = state.get("quality_result")
+
+        snapshot: Dict[str, Any] = {
+            "version": 1,
+            "status": status,
+            "trace_id": state.get("trace_id", ""),
+            "last_query": state.get("query", ""),
+            "current_state": state.get("current_state", session.current_state),
+            "state_history": list(state.get("state_history", [])),
+            "retry_count": int(state.get("retry_count", 0)),
+            "updated_at": datetime.now().isoformat(),
+        }
+
+        if state.get("error"):
+            snapshot["error"] = state["error"]
+        if intent:
+            snapshot["intent"] = {
+                "intent": intent.intent,
+                "confidence": intent.confidence,
+                "slots": dict(intent.slots),
+                "needs_clarification": intent.needs_clarification,
+                "clarification_question": intent.clarification_question,
+            }
+        if profile:
+            snapshot["profile"] = {
+                "influencer_id": profile.influencer_id,
+                "name": profile.name,
+                "category": profile.category,
+                "audience_age_range": profile.audience_age_range,
+                "audience_gender_ratio": profile.audience_gender_ratio,
+                "top_content_keywords": list(profile.top_content_keywords),
+                "style": {
+                    "tone": profile.style.tone,
+                    "formality_level": profile.style.formality_level,
+                    "catchphrases": list(profile.style.catchphrases),
+                    "avg_sentence_length": profile.style.avg_sentence_length,
+                    "interaction_frequency": profile.style.interaction_frequency,
+                    "humor_level": profile.style.humor_level,
+                },
+            }
+        if script:
+            max_chars = settings.orchestration.checkpoint_script_max_chars
+            content = script.content
+            content_truncated = False
+            if len(content) > max_chars:
+                content = content[:max_chars]
+                content_truncated = True
+            snapshot["script"] = {
+                "script_id": script.script_id,
+                "content": content,
+                "content_length": len(script.content),
+                "content_truncated": content_truncated,
+                "category": script.category,
+                "scenario": script.scenario,
+                "style_keywords": list(script.style_keywords),
+                "turn_index": script.turn_index,
+                "adopted": script.adopted,
+                "quality_score": script.quality_score,
+                "generation_params": dict(script.generation_params),
+            }
+        if quality_result:
+            snapshot["quality_result"] = {
+                "passed": quality_result.passed,
+                "overall_score": quality_result.overall_score,
+                "sensitive_words": list(quality_result.sensitive_words),
+                "compliance_issues": list(quality_result.compliance_issues),
+                "style_consistency": quality_result.style_consistency,
+                "suggestions": list(quality_result.suggestions),
+            }
+
+        checkpoint_writer = state.get("checkpoint_writer")
+        if checkpoint_writer is not None:
+            record = None
+            try:
+                record = await checkpoint_writer(
+                    session.session_id,
+                    snapshot,
+                    str(state.get("trace_id", "")),
+                    status,
+                )
+            except Exception as exc:
+                logger.warning("checkpoint_writer failed for %s: %s", session.session_id, exc)
+
+            summary = {
+                "status": snapshot.get("status"),
+                "trace_id": snapshot.get("trace_id"),
+                "last_query": snapshot.get("last_query"),
+                "current_state": snapshot.get("current_state"),
+                "state_history": snapshot.get("state_history", [])[-6:],
+                "retry_count": snapshot.get("retry_count", 0),
+                "updated_at": snapshot.get("updated_at"),
+            }
+            if record and isinstance(record, dict):
+                summary["version"] = record.get("version")
+                summary["created_at"] = record.get("created_at")
+                summary["checksum"] = record.get("checksum")
+            session.mark_workflow_snapshot(summary)
+        else:
+            session.mark_workflow_snapshot(snapshot)
+
+        obs.record_checkpoint(status)
+
+        checkpoint_saver = state.get("checkpoint_saver")
+        if (
+            checkpoint_saver is not None
+            and settings.orchestration.checkpoint_auto_save
+        ):
+            await checkpoint_saver(session)
+
+    async def handle_stream(
+        self,
+        query: str,
+        session: SessionContext,
+    ) -> AsyncGenerator[str, None]:
         """
-        流式处理 - 首token前完成所有前置步骤, 然后流式返回
+        流式处理：首 token 前执行意图和画像，随后流式返回。
         """
-        # 前置步骤 (阻塞, 首token前必须完成)
         intent_msg = AgentMessage(
             payload={"query": query, "session": session},
             session_id=session.session_id,
         )
         intent_resp = await self.intent_agent(intent_msg)
-        intent_result = intent_resp.payload.get("intent_result", IntentResult(
-            intent="script_generation", confidence=0.5
-        ))
+        self._raise_if_agent_error(intent_resp, "intent_recognition")
+        intent_result = intent_resp.payload.get(
+            "intent_result", IntentResult(intent="script_generation", confidence=0.5)
+        )
 
         if intent_result.needs_clarification:
             yield intent_result.clarification_question
             return
 
-        # 并行获取画像
         profile = await self.profile_agent.fetch(intent_result.slots)
 
-        # 流式生成
         async for token in self.script_agent.generate_stream(
-            intent_result.slots, profile, session
+            intent_result.slots,
+            profile,
+            session,
         ):
             yield token
+
+    def info(self) -> Dict[str, Any]:
+        return {
+            "langgraph_enabled": self._graph is not None,
+            "dedup_enabled": settings.orchestration.request_dedup_enabled,
+            "checkpoint_auto_save": settings.orchestration.checkpoint_auto_save,
+        }
+
+    async def shutdown(self) -> None:
+        """释放底层连接资源"""
+        clients = []
+        for agent in (
+            self.intent_agent,
+            self.profile_agent,
+            self.script_agent,
+            self.quality_agent,
+        ):
+            llm = getattr(agent, "llm", None)
+            if llm is not None:
+                clients.append(llm)
+
+        # 关闭 skill 内部可能持有的 LLM client
+        for skill in self.skill_registry.iter_skills():
+            for attr in ("_llm", "_script_agent", "_quality_agent"):
+                obj = getattr(skill, attr, None)
+                if obj is None:
+                    continue
+                if hasattr(obj, "close"):
+                    clients.append(obj)
+                llm = getattr(obj, "llm", None)
+                if llm is not None:
+                    clients.append(llm)
+
+        unique_clients = list({id(c): c for c in clients}.values())
+        for client in unique_clients:
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    logger.warning("Failed to close client: %s", type(client).__name__)

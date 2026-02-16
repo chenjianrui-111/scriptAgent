@@ -126,6 +126,8 @@ class SessionContext:
     # 状态机
     current_state: str = "INIT"
     state_history: List[str] = field(default_factory=list)
+    # 工作流快照（用于故障恢复/快速续跑）
+    workflow_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     def add_turn(self, user_message: str, assistant_message: str,
                  intent: Optional[IntentResult] = None,
@@ -141,6 +143,10 @@ class SessionContext:
         )
         self.turns.append(turn)
         return turn
+
+    def mark_workflow_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """更新工作流快照"""
+        self.workflow_snapshot = snapshot
 
 
 @dataclass

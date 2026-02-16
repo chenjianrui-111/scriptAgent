@@ -70,6 +70,21 @@ try:
         ["skill_name"],
     )
 
+    LOCK_TIMEOUTS = Counter(
+        "script_agent_lock_timeouts_total",
+        "Session lock timeout count",
+        ["endpoint"],
+    )
+    WORKFLOW_CACHE_HITS = Counter(
+        "script_agent_workflow_cache_hits_total",
+        "Workflow dedup cache hit count",
+    )
+    CHECKPOINT_WRITES = Counter(
+        "script_agent_checkpoint_writes_total",
+        "Workflow checkpoint writes",
+        ["status"],
+    )
+
     _METRICS_AVAILABLE = True
     logger.info("Prometheus metrics initialized")
 
@@ -106,6 +121,21 @@ def record_intent_confidence(intent: str, confidence: float):
 def record_skill_hit(skill_name: str):
     if _METRICS_AVAILABLE:
         SKILL_HITS.labels(skill_name=skill_name).inc()
+
+
+def record_lock_timeout(endpoint: str):
+    if _METRICS_AVAILABLE:
+        LOCK_TIMEOUTS.labels(endpoint=endpoint).inc()
+
+
+def record_workflow_cache_hit():
+    if _METRICS_AVAILABLE:
+        WORKFLOW_CACHE_HITS.inc()
+
+
+def record_checkpoint(status: str):
+    if _METRICS_AVAILABLE:
+        CHECKPOINT_WRITES.labels(status=status).inc()
 
 
 @contextmanager

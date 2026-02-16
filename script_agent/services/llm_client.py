@@ -189,6 +189,7 @@ class LLMServiceClient:
 
     def __init__(self, env: Optional[str] = None):
         env = env or settings.llm.env
+        self._fallback_backend: Optional[LLMBackend] = None
         if env == "production":
             self.backend: LLMBackend = VLLMBackend(
                 base_url=settings.llm.vllm_base_url,
@@ -200,21 +201,66 @@ class LLMServiceClient:
                 base_url=settings.llm.ollama_base_url,
                 model_map=settings.llm.ollama_model_map,
             )
+        self._fallback_backend = self._build_fallback_backend()
         logger.info(f"LLMServiceClient initialized with backend: {type(self.backend).__name__}")
+
+    def _build_fallback_backend(self) -> Optional[LLMBackend]:
+        if not settings.llm.fallback_enabled:
+            return None
+
+        backend_type = settings.llm.fallback_backend.lower()
+        if backend_type == "vllm":
+            return VLLMBackend(
+                base_url=settings.llm.fallback_base_url,
+                model=settings.llm.fallback_model,
+                adapter_map={"通用": settings.llm.fallback_model},
+            )
+        if backend_type == "ollama":
+            return OllamaBackend(
+                base_url=settings.llm.fallback_base_url,
+                model_map={"通用": settings.llm.fallback_model},
+            )
+
+        logger.warning("Unsupported fallback backend: %s", backend_type)
+        return None
 
     async def generate(self, prompt: str, category: str = "通用",
                        stream: bool = True,
                        **kwargs) -> AsyncGenerator[str, None]:
         """统一流式生成接口"""
-        async for token in self.backend.generate(prompt, category, stream, **kwargs):
+        emitted = False
+        try:
+            async for token in self.backend.generate(prompt, category, stream, **kwargs):
+                emitted = True
+                yield token
+            return
+        except Exception as exc:
+            if emitted or self._fallback_backend is None:
+                raise
+            logger.warning("Primary LLM stream failed, fallback to backup model: %s", exc)
+
+        async for token in self._fallback_backend.generate(
+            prompt, "通用", stream, **kwargs
+        ):
             yield token
 
     async def generate_sync(self, prompt: str, category: str = "通用",
                             max_tokens: int = 1024, **kwargs) -> str:
         """统一同步生成接口"""
-        return await self.backend.generate_sync(
-            prompt, category, max_tokens=max_tokens, **kwargs
-        )
+        try:
+            return await self.backend.generate_sync(
+                prompt, category, max_tokens=max_tokens, **kwargs
+            )
+        except Exception as exc:
+            if self._fallback_backend is None:
+                raise
+            logger.warning(
+                "Primary LLM sync failed, fallback to backup model: %s",
+                exc,
+            )
+            return await self._fallback_backend.generate_sync(
+                prompt, "通用", max_tokens=max_tokens, **kwargs
+            )
 
     async def health_check(self) -> Dict:
         return await self.backend.health_check()
@@ -222,3 +268,5 @@ class LLMServiceClient:
     async def close(self):
         """关闭后端连接"""
         await self.backend.close()
+        if self._fallback_backend is not None:
+            await self._fallback_backend.close()

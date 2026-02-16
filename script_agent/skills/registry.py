@@ -3,7 +3,7 @@ Skill 注册中心 — 管理所有 Skill 的注册、发现与路由
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from script_agent.skills.base import BaseSkill
 
@@ -77,3 +77,7 @@ class SkillRegistry:
             }
             for s in self._skills.values()
         ]
+
+    def iter_skills(self) -> Iterable[BaseSkill]:
+        """遍历所有已注册 Skill"""
+        return self._skills.values()

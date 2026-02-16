@@ -350,6 +350,190 @@ class TestOrchestrator:
 
         asyncio.run(_test())
 
+    def test_orchestrator_resume_seed(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from script_agent.models.context import SessionContext
+
+        session = SessionContext(session_id="s1")
+        session.workflow_snapshot = {
+            "status": "in_progress",
+            "last_query": "帮我写开场话术",
+            "intent": {
+                "intent": "script_generation",
+                "confidence": 0.9,
+                "slots": {"category": "美妆", "scenario": "直播带货"},
+            },
+            "retry_count": 1,
+        }
+
+        orch = Orchestrator()
+        seed = orch._build_resume_seed("帮我写开场话术", session.workflow_snapshot)
+        assert seed.get("intent_result") is not None
+        assert seed["intent_result"].intent == "script_generation"
+        assert seed["retry_count"] == 1
+
+
+class TestEnterpriseFeatures:
+    """企业级能力测试: 恢复机制 + 并发管理"""
+
+    def test_session_snapshot_serialization(self):
+        from script_agent.models.context import SessionContext
+        from script_agent.services.session_manager import SessionSerializer
+
+        session = SessionContext(session_id="s1", tenant_id="t1")
+        session.workflow_snapshot = {
+            "status": "in_progress",
+            "current_state": "PROFILE_FETCHING",
+            "last_query": "继续生成",
+        }
+
+        serializer = SessionSerializer()
+        data = serializer.to_dict(session)
+        restored = serializer.from_dict(data)
+        assert restored.workflow_snapshot["status"] == "in_progress"
+        assert restored.workflow_snapshot["current_state"] == "PROFILE_FETCHING"
+
+    def test_session_lock_manager_serializes_same_session(self):
+        from script_agent.services.concurrency import SessionLockManager
+
+        async def _test():
+            manager = SessionLockManager(default_timeout_seconds=2.0)
+            events = []
+
+            async def worker(name: str, delay: float):
+                async with manager.acquire("session-1"):
+                    events.append(f"{name}-start")
+                    await asyncio.sleep(delay)
+                    events.append(f"{name}-end")
+
+            await asyncio.gather(
+                worker("a", 0.05),
+                worker("b", 0.01),
+            )
+            # 串行保证：一个 worker 的 end 必须先于另一个 worker 的 start
+            serialized = (
+                events.index("a-end") < events.index("b-start")
+                or events.index("b-end") < events.index("a-start")
+            )
+            assert serialized
+
+        asyncio.run(_test())
+
+    def test_session_lock_manager_stats(self):
+        from script_agent.services.concurrency import SessionLockManager
+
+        async def _test():
+            manager = SessionLockManager(default_timeout_seconds=1.0)
+            stats = await manager.stats()
+            assert "tracked_sessions" in stats
+            assert "active_locks" in stats
+            assert "queued_waiters" in stats
+
+        asyncio.run(_test())
+
+    def test_orchestrator_dedup_cache_hit(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from datetime import datetime
+
+        snapshot = {
+            "status": "completed",
+            "last_query": "同一请求",
+            "updated_at": datetime.now().isoformat(),
+            "script": {
+                "script_id": "x1",
+                "content": "缓存话术",
+                "content_truncated": False,
+                "category": "美妆",
+                "scenario": "直播带货",
+            },
+            "intent": {
+                "intent": "script_generation",
+                "confidence": 0.95,
+                "slots": {"category": "美妆", "scenario": "直播带货"},
+            },
+            "state_history": ["COMPLETED"],
+        }
+
+        orch = Orchestrator()
+        result = orch._build_cached_completed_result(
+            snapshot=snapshot,
+            query="同一请求",
+            trace_id="t1",
+        )
+        assert result is not None
+        assert result["from_cache"] is True
+        assert result["script"].content == "缓存话术"
+
+    def test_orchestrator_checkpoint_truncate_recovery_safe(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from script_agent.models.context import SessionContext
+        from script_agent.models.message import GeneratedScript
+
+        session = SessionContext(session_id="s1")
+        orch = Orchestrator()
+
+        async def _test():
+            await orch._write_checkpoint(
+                {
+                    "session": session,
+                    "status": "in_progress",
+                    "trace_id": "t",
+                    "query": "q",
+                    "current_state": "SCRIPT_GENERATING",
+                    "state_history": ["SCRIPT_GENERATING"],
+                    "retry_count": 0,
+                    "script": GeneratedScript(content="a" * 5000),
+                },
+                status="in_progress",
+            )
+
+        asyncio.run(_test())
+        seed = orch._build_resume_seed("q", session.workflow_snapshot)
+        # 截断脚本不参与恢复，避免半内容复用
+        assert "script" not in seed
+
+    def test_checkpoint_manager_memory_versioning_replay(self):
+        from script_agent.services.checkpoint_store import (
+            MemoryCheckpointStore,
+            WorkflowCheckpointManager,
+        )
+
+        async def _test():
+            manager = WorkflowCheckpointManager(store=MemoryCheckpointStore())
+            r1 = await manager.write("s1", {"current_state": "A"}, "t1", "in_progress")
+            r2 = await manager.write("s1", {"current_state": "B"}, "t2", "completed")
+            assert r1["version"] == 1
+            assert r2["version"] == 2
+
+            latest = await manager.latest_payload("s1")
+            assert latest is not None
+            assert latest["current_state"] == "B"
+
+            replay = await manager.replay("s1", 1)
+            assert replay is not None
+            assert replay["current_state"] == "A"
+
+            history = await manager.history("s1", limit=10)
+            assert len(history) == 2
+            assert history[0]["version"] == 2
+
+        asyncio.run(_test())
+
+    def test_core_rate_limiter_local(self):
+        from script_agent.services.core_rate_limiter import LocalCoreRateLimiter
+
+        async def _test():
+            limiter = LocalCoreRateLimiter(qps_per_tenant=2, tokens_per_minute=10)
+            allow1 = await limiter.check_and_consume("t1", token_cost=3)
+            allow2 = await limiter.check_and_consume("t1", token_cost=3)
+            deny_qps = await limiter.check_and_consume("t1", token_cost=3)
+            assert allow1.allowed
+            assert allow2.allowed
+            assert not deny_qps.allowed
+            assert deny_qps.reason == "qps_limit_exceeded"
+
+        asyncio.run(_test())
+
 
 # =======================================================================
 # Run
