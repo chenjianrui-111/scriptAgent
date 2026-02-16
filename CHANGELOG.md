@@ -22,6 +22,8 @@
   - 流式与同步调用都支持重试+降级策略
   - 健康检查改为显式校验 HTTP 成功状态
 - `script_agent/config/settings.py` 增加 `LLM_*` 可靠性配置项（重试、超时、断路器、fallback 策略、幂等）。
+- 流式接口 `POST /api/v1/generate/stream` 改为复用 `Orchestrator` 统一状态推进与 checkpoint writer，不再在 API 层手写固定状态。
+- `Orchestrator.handle_stream` 对齐同步链路：支持 `checkpoint_loader/checkpoint_writer/checkpoint_saver`，checkpoint 中状态序列与审计字段统一（含 `PRODUCT_FETCHING`）。
 
 ### Fixed
 

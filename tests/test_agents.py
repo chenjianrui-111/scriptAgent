@@ -383,6 +383,120 @@ class TestOrchestrator:
         assert seed["intent_result"].intent == "script_generation"
         assert seed["retry_count"] == 1
 
+    def test_stream_checkpoint_uses_orchestrator_state_machine(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from script_agent.models.context import (
+            InfluencerProfile,
+            ProductProfile,
+            SessionContext,
+        )
+        from script_agent.models.message import IntentResult
+
+        class DummyIntentAgent:
+            async def __call__(self, message):
+                return message.create_response(
+                    payload={
+                        "intent_result": IntentResult(
+                            intent="stream_generation",
+                            confidence=0.95,
+                            slots={"category": "美妆", "scenario": "直播带货"},
+                        )
+                    },
+                    source="intent",
+                )
+
+        class DummyProfileAgent:
+            async def __call__(self, message):
+                slots = message.payload.get("slots", {})
+                return message.create_response(
+                    payload={
+                        "profile": InfluencerProfile(
+                            influencer_id="inf-1",
+                            name="小雅",
+                            category=slots.get("category", "通用"),
+                        )
+                    },
+                    source="profile",
+                )
+
+        class DummyProductAgent:
+            async def fetch(self, slots, profile, session, query=""):
+                product = ProductProfile(
+                    product_id="prod-1",
+                    name="小金瓶精华",
+                    category=slots.get("category", "通用"),
+                    selling_points=["提亮肤色", "吸收快"],
+                )
+                return product, [{"memory_id": "m1", "score": 0.91}]
+
+        class DummyScriptAgent:
+            async def generate_stream(
+                self,
+                intent_slots,
+                profile,
+                session,
+                product=None,
+                memory_hits=None,
+            ):
+                yield "宝子们，"
+                yield "今天推荐小金瓶精华。"
+
+        class DummyMemoryRetriever:
+            async def remember_script(self, **kwargs):
+                return None
+
+        orch = Orchestrator()
+        orch.intent_agent = DummyIntentAgent()
+        orch.profile_agent = DummyProfileAgent()
+        orch.product_agent = DummyProductAgent()
+        orch.script_agent = DummyScriptAgent()
+        orch.memory_retriever = DummyMemoryRetriever()
+
+        session = SessionContext(session_id="s-stream", tenant_id="t1", category="美妆")
+        writes = []
+
+        async def _writer(session_id, payload, trace_id, status):
+            writes.append(
+                {
+                    "session_id": session_id,
+                    "payload": payload,
+                    "trace_id": trace_id,
+                    "status": status,
+                }
+            )
+            return {
+                "version": len(writes),
+                "created_at": "2026-02-16T00:00:00",
+                "checksum": f"ck-{len(writes)}",
+            }
+
+        async def _run():
+            chunks = []
+            async for token in orch.handle_stream(
+                query="帮我写这款精华直播话术",
+                session=session,
+                trace_id="trace-stream-1",
+                checkpoint_saver=None,
+                checkpoint_loader=None,
+                checkpoint_writer=_writer,
+            ):
+                chunks.append(token)
+            return "".join(chunks)
+
+        content = asyncio.run(_run())
+
+        assert content == "宝子们，今天推荐小金瓶精华。"
+        assert len(session.turns) == 1
+        assert session.turns[0].assistant_message == content
+        assert session.workflow_snapshot.get("current_state") == "COMPLETED"
+
+        states = [w["payload"].get("current_state") for w in writes]
+        assert "PRODUCT_FETCHING" in states
+        assert states[-1] == "COMPLETED"
+        assert writes[-1]["status"] == "completed"
+        assert all(w["trace_id"] == "trace-stream-1" for w in writes)
+        assert "PRODUCT_FETCHING" in writes[-1]["payload"].get("state_history", [])
+
 
 class TestEnterpriseFeatures:
     """企业级能力测试: 恢复机制 + 并发管理"""

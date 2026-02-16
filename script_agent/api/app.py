@@ -15,7 +15,6 @@ API层 - FastAPI应用
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -236,69 +235,24 @@ async def generate_script_stream(
         try:
             async with session_lock_manager.acquire(req.session_id):
                 session = await _load_session_with_tenant_check(req.session_id, auth)
-                chunks = []
-                async for token in orchestrator.handle_stream(req.query, session):
-                    chunks.append(token)
+                async for token in orchestrator.handle_stream(
+                    query=req.query,
+                    session=session,
+                    trace_id=req.trace_id,
+                    checkpoint_saver=session_manager.save,
+                    checkpoint_loader=checkpoint_manager.latest_payload,
+                    checkpoint_writer=checkpoint_manager.write,
+                ):
                     yield f"data: {token}\n\n"
 
-                content = "".join(chunks).strip()
-                if content:
-                    session.add_turn(
-                        user_message=req.query,
-                        assistant_message=content,
-                    )
-                    checkpoint_payload = {
-                        "version": 1,
-                        "status": "completed",
-                        "trace_id": req.trace_id or "",
-                        "last_query": req.query,
-                        "current_state": "COMPLETED",
-                        "state_history": [
-                            "INTENT_RECOGNIZING",
-                            "PROFILE_FETCHING",
-                            "SCRIPT_GENERATING",
-                            "COMPLETED",
-                        ],
-                        "retry_count": 0,
-                        "updated_at": datetime.now().isoformat(),
-                        "script": {
-                            "script_id": "",
-                            "content": content[: settings.orchestration.checkpoint_script_max_chars],
-                            "content_length": len(content),
-                            "content_truncated": (
-                                len(content) > settings.orchestration.checkpoint_script_max_chars
-                            ),
-                            "category": session.category or "通用",
-                            "scenario": "stream_generation",
-                            "style_keywords": [],
-                            "turn_index": len(session.turns) - 1,
-                            "adopted": False,
-                            "quality_score": 0.0,
-                            "generation_params": {},
-                        },
-                    }
-                    record = await checkpoint_manager.write(
-                        session_id=session.session_id,
-                        payload=checkpoint_payload,
-                        trace_id=req.trace_id or "",
-                        status="completed",
-                    )
-                    session.mark_workflow_snapshot(
-                        {
-                            "status": "completed",
-                            "trace_id": req.trace_id or "",
-                            "last_query": req.query,
-                            "current_state": "COMPLETED",
-                            "updated_at": checkpoint_payload["updated_at"],
-                            "version": record.get("version"),
-                            "checksum": record.get("checksum"),
-                        }
-                    )
                 await session_manager.save(session)
                 yield "data: [DONE]\n\n"
         except SessionLockTimeoutError:
             obs.record_lock_timeout("/api/v1/generate/stream")
             yield "data: [ERROR] 会话正在处理中，请稍后重试\n\n"
+        except Exception as exc:
+            logger.error("Stream generate failed: %s", exc, exc_info=True)
+            yield "data: [ERROR] 生成失败，请稍后重试\n\n"
 
     return StreamingResponse(
         event_generator(),

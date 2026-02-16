@@ -1112,40 +1112,153 @@ class Orchestrator:
         self,
         query: str,
         session: SessionContext,
+        trace_id: Optional[str] = None,
+        checkpoint_saver: Optional[CheckpointSaver] = None,
+        checkpoint_loader: Optional[CheckpointLoader] = None,
+        checkpoint_writer: Optional[CheckpointWriter] = None,
     ) -> AsyncGenerator[str, None]:
         """
-        流式处理：首 token 前执行意图和画像，随后流式返回。
+        流式处理：与同步链路复用同一状态推进和 checkpoint writer。
         """
-        intent_msg = AgentMessage(
-            payload={"query": query, "session": session},
-            session_id=session.session_id,
-        )
-        intent_resp = await self.intent_agent(intent_msg)
-        self._raise_if_agent_error(intent_resp, "intent_recognition")
-        intent_result = intent_resp.payload.get(
-            "intent_result", IntentResult(intent="script_generation", confidence=0.5)
+        trace_id = trace_id or str(uuid.uuid4())
+        workflow_start = time.perf_counter()
+        workflow_snapshot = await self._load_workflow_snapshot(
+            session=session,
+            checkpoint_loader=checkpoint_loader,
         )
 
-        if intent_result.needs_clarification:
-            yield intent_result.clarification_question
-            return
+        result: Dict[str, Any] = {
+            "trace_id": trace_id,
+            "success": False,
+            "script": None,
+            "quality_result": None,
+            "clarification_needed": False,
+            "clarification_question": "",
+            "state_history": [],
+            "timing": {},
+        }
+        state: OrchestrationState = {
+            "query": query,
+            "trace_id": trace_id,
+            "session": session,
+            "checkpoint_saver": checkpoint_saver,
+            "checkpoint_writer": checkpoint_writer,
+            "workflow_start": workflow_start,
+            "timing": {},
+            "state_history": [],
+            "current_state": WorkflowState.INIT.value,
+            "retry_count": 0,
+            "should_retry": False,
+            "request_recorded": False,
+            "result": result,
+        }
+        state.update(self._build_resume_seed(query, workflow_snapshot))
 
-        profile = await self.profile_agent.fetch(intent_result.slots)
-        product, memory_hits = await self.product_agent.fetch(
-            intent_result.slots,
-            profile,
-            session,
-            query=query,
-        )
+        try:
+            state.update(await self._node_context_loading(state))
+            state.update(await self._node_intent_recognizing(state))
 
-        async for token in self.script_agent.generate_stream(
-            intent_result.slots,
-            profile,
-            session,
-            product=product,
-            memory_hits=memory_hits,
-        ):
-            yield token
+            route = self._route_after_intent(state)
+            if route == "intent_clarifying":
+                state.update(await self._node_intent_clarifying(state))
+                state.update(await self._node_completed(state))
+                question = state.get("result", {}).get(
+                    "clarification_question", "请提供更多信息以便生成话术"
+                )
+                if question:
+                    yield question
+                return
+
+            if route == "skill_executing":
+                state.update(await self._node_skill_executing(state))
+                state.update(await self._node_completed(state))
+                script = state.get("result", {}).get("script") or state.get("script")
+                if script and script.content:
+                    yield script.content
+                return
+
+            state.update(await self._node_profile_fetching(state))
+            state.update(await self._node_product_fetching(state))
+
+            stream_start = time.perf_counter()
+            history, current_state = self._move_state(state, WorkflowState.SCRIPT_GENERATING)
+            timing = dict(state.get("timing", {}))
+            updates = {
+                "state_history": history,
+                "current_state": current_state,
+                "timing": timing,
+            }
+            state.update(updates)
+            await self._write_checkpoint(state, status="in_progress")
+
+            intent_result = state.get(
+                "intent_result", IntentResult(intent="script_generation", confidence=0.5)
+            )
+            profile = state.get("profile", InfluencerProfile())
+            product = state.get("product", ProductProfile())
+            memory_hits = list(state.get("memory_hits", []))
+
+            chunks: list[str] = []
+            async for token in self.script_agent.generate_stream(
+                intent_result.slots,
+                profile,
+                session,
+                product=product,
+                memory_hits=memory_hits,
+            ):
+                chunks.append(token)
+                yield token
+
+            timing["script_generation"] = (time.perf_counter() - stream_start) * 1000
+            content = "".join(chunks).strip()
+            if content:
+                state["script"] = GeneratedScript(
+                    content=content,
+                    category=(
+                        intent_result.slots.get("category")
+                        or profile.category
+                        or session.category
+                        or "通用"
+                    ),
+                    scenario=intent_result.slots.get("scenario", "stream_generation"),
+                    style_keywords=self._extract_style_keywords(
+                        intent_result.slots.get("style_hint")
+                    ),
+                    turn_index=len(session.turns),
+                    generation_params={
+                        "streaming": True,
+                        "memory_hits": len(memory_hits),
+                    },
+                )
+                state["quality_result"] = None
+            else:
+                state["error"] = "empty stream output"
+
+            state["timing"] = timing
+            state.update(await self._node_completed(state))
+        except Exception as exc:
+            logger.error(f"[{trace_id}] Stream orchestrator error: {exc}", exc_info=True)
+            state["error"] = str(exc)
+            state["current_state"] = WorkflowState.ERROR.value
+            result = dict(state.get("result", {}))
+            result["error"] = str(exc)
+            result["success"] = False
+            result["timing"] = {
+                **dict(state.get("timing", {})),
+                "total": (time.perf_counter() - workflow_start) * 1000,
+            }
+            result["state_history"] = list(session.state_history)
+            state["result"] = result
+            await self._write_checkpoint(state, status="failed")
+            raise
+
+    def _extract_style_keywords(self, style_hint: Any) -> list[str]:
+        if isinstance(style_hint, str):
+            normalized = style_hint.replace("，", ",")
+            return [x.strip() for x in normalized.split(",") if x.strip()]
+        if isinstance(style_hint, list):
+            return [str(x).strip() for x in style_hint if str(x).strip()]
+        return []
 
     def info(self) -> Dict[str, Any]:
         return {
