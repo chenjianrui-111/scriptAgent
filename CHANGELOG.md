@@ -27,6 +27,10 @@
   - tenant/role allowlist policy engine
   - prompt injection tripwire
 - 新增工具调用安全测试用例（schema/allowlist/tripwire）。
+- 新增配置测试 `tests/test_settings.py`，覆盖本地/生产环境 Qwen 默认模型分流与本地模型覆盖能力。
+- 新增生成链路回归测试（`tests/test_agents.py`）：
+  - 长期记忆提示词注入强度随 token 预算占比变化
+  - script agent 报错/空文案时 skill 返回失败
 
 ### Changed
 
@@ -45,10 +49,17 @@
 - `Orchestrator` 的 skill 执行路径接入统一 preflight，拦截结果进入 checkpoint/audit 链路。
 - `AuthContext` 增加 `role`，并在 API 层将角色注入会话快照供 tool policy 使用。
 - 内置技能 (`script_gen`/`script_modify`/`batch_generate`) 新增严格输入 schema 定义。
+- `script_agent/config/settings.py` 增加按环境的 Qwen 默认模型分流：
+  - `development/testing` 默认 `qwen2.5:0.5b`
+  - `production` 默认 `qwen2.5:7b`
+  - 支持 `QWEN_MODEL_LOCAL` / `QWEN_MODEL_PRODUCTION` / `VLLM_MODEL` 覆盖
+- `PromptBuilder` 的长期记忆提示词注入改为按 `longterm_token_budget/total_token_budget` 动态调节注入条数与片段长度。
+- `Orchestrator` 在 skill 失败时透传错误信息到 API `error` 字段，便于前端与调用方定位问题。
 
 ### Fixed
 
-- 待补充
+- 修复 script generation skill 在下游 agent 报错或返回空文案时可能误判为成功的问题。
+- 修复本地开发环境默认模型名与已加载小模型不一致导致的 `model not found` 问题（通过环境化默认模型策略规避）。
 
 ## [1.2.0] - 2026-02-16
 

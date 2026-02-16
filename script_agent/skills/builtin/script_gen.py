@@ -7,7 +7,7 @@ from typing import Any, Dict
 from script_agent.skills.base import BaseSkill, SkillContext, SkillResult
 from script_agent.agents.script_agent import ScriptGenerationAgent
 from script_agent.agents.quality_agent import QualityCheckAgent
-from script_agent.models.message import AgentMessage, GeneratedScript
+from script_agent.models.message import AgentMessage, GeneratedScript, MessageType
 from script_agent.config.settings import settings
 
 
@@ -82,7 +82,18 @@ class ScriptGenerationSkill(BaseSkill):
             session_id=session.session_id,
         )
         script_resp = await self._script_agent(script_msg)
+        if script_resp.message_type == MessageType.ERROR:
+            return SkillResult(
+                success=False,
+                message=script_resp.payload.get("error_message", "话术生成失败"),
+            )
         script: GeneratedScript = script_resp.payload.get("script", GeneratedScript())
+        if not script.content.strip():
+            return SkillResult(
+                success=False,
+                script=script,
+                message="生成结果为空，请检查模型服务或提示词约束",
+            )
 
         # 质量校验 + 重试
         retry_count = 0
@@ -94,6 +105,12 @@ class ScriptGenerationSkill(BaseSkill):
                 session_id=session.session_id,
             )
             quality_resp = await self._quality_agent(quality_msg)
+            if quality_resp.message_type == MessageType.ERROR:
+                return SkillResult(
+                    success=False,
+                    script=script,
+                    message=quality_resp.payload.get("error_message", "质量检查失败"),
+                )
             quality_result = quality_resp.payload.get("quality_result")
 
             if quality_result and quality_result.passed:

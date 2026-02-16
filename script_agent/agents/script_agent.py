@@ -21,6 +21,7 @@ from script_agent.models.context import (
 )
 from script_agent.context.session_compressor import SessionContextCompressor
 from script_agent.services.llm_client import LLMServiceClient
+from script_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +158,28 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _build_memory_prompt(self, memory_hits: List[Dict[str, Any]]) -> str:
+        # 依据长期记忆预算占比动态调节注入强度，避免记忆片段挤占主任务空间
+        total_budget = max(1, int(settings.context.total_token_budget))
+        longterm_budget = max(0, int(settings.context.longterm_token_budget))
+        budget_ratio = max(0.05, min(0.6, longterm_budget / total_budget))
+
+        if budget_ratio < 0.16:
+            max_items = 1
+        elif budget_ratio < 0.3:
+            max_items = 2
+        else:
+            max_items = 3
+        snippet_max_chars = max(80, min(260, int(110 + 260 * budget_ratio)))
+
         lines = ["\n【历史高相关样本（向量召回）】"]
-        for idx, row in enumerate(memory_hits[:3], start=1):
+        for idx, row in enumerate(memory_hits[:max_items], start=1):
             text = str(row.get("text", "")).replace("\n", " ").strip()
             score = float(row.get("score", 0.0))
-            lines.append(f"{idx}. (score={score:.3f}) {text[:180]}")
-        lines.append("请借鉴其表达方式与结构，不要逐句照搬。")
+            influence = "高参考" if score >= 0.75 else "中参考" if score >= 0.45 else "低参考"
+            lines.append(
+                f"{idx}. ({influence}, score={score:.3f}) {text[:snippet_max_chars]}"
+            )
+        lines.append("优先参考高分样本的结构与语气，不要逐句照搬。")
         return "\n".join(lines)
 
     def _build_history_context(self, session: SessionContext) -> str:

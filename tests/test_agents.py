@@ -910,6 +910,110 @@ class TestEnterpriseFeatures:
 
         asyncio.run(_test())
 
+    def test_prompt_builder_memory_prompt_respects_longterm_budget_ratio(self):
+        from script_agent.agents.script_agent import PromptBuilder
+        from script_agent.config.settings import settings
+
+        builder = PromptBuilder()
+        memory_hits = [
+            {"score": 0.91, "text": "样本1 " * 80},
+            {"score": 0.72, "text": "样本2 " * 80},
+            {"score": 0.51, "text": "样本3 " * 80},
+        ]
+
+        old_total = settings.context.total_token_budget
+        old_longterm = settings.context.longterm_token_budget
+        try:
+            settings.context.total_token_budget = 1000
+            settings.context.longterm_token_budget = 100
+            prompt_low = builder._build_memory_prompt(memory_hits)
+            assert "1." in prompt_low
+            assert "2." not in prompt_low
+
+            settings.context.longterm_token_budget = 400
+            prompt_high = builder._build_memory_prompt(memory_hits)
+            assert "3." in prompt_high
+        finally:
+            settings.context.total_token_budget = old_total
+            settings.context.longterm_token_budget = old_longterm
+
+    def test_script_generation_skill_fails_on_script_agent_error(self):
+        from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
+        from script_agent.skills.base import SkillContext
+        from script_agent.models.context import InfluencerProfile, SessionContext
+        from script_agent.models.message import AgentMessage, IntentResult
+
+        class BrokenScriptAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_error(
+                    error_code="script_generation_error",
+                    error_msg="模型不可用",
+                )
+
+        class DummyQualityAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_error(
+                    error_code="quality_error",
+                    error_msg="should not be called",
+                )
+
+        async def _test():
+            skill = ScriptGenerationSkill()
+            skill._script_agent = BrokenScriptAgent()
+            skill._quality_agent = DummyQualityAgent()
+            ctx = SkillContext(
+                intent=IntentResult(
+                    intent="script_generation",
+                    confidence=0.9,
+                    slots={"category": "美妆", "scenario": "直播带货"},
+                ),
+                profile=InfluencerProfile(category="美妆"),
+                session=SessionContext(session_id="s-skill-error"),
+                trace_id="trace-skill-error",
+            )
+            result = await skill.execute(ctx)
+            assert result.success is False
+            assert "模型不可用" in result.message
+
+        asyncio.run(_test())
+
+    def test_script_generation_skill_fails_on_empty_script(self):
+        from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
+        from script_agent.skills.base import SkillContext
+        from script_agent.models.context import InfluencerProfile, SessionContext
+        from script_agent.models.message import AgentMessage, GeneratedScript, IntentResult
+
+        class EmptyScriptAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_response(
+                    payload={"script": GeneratedScript(content="   ")},
+                    source="script_generation",
+                )
+
+        class DummyQualityAgent:
+            async def __call__(self, message: AgentMessage):
+                raise AssertionError("quality agent should not run on empty script")
+
+        async def _test():
+            skill = ScriptGenerationSkill()
+            skill._script_agent = EmptyScriptAgent()
+            skill._quality_agent = DummyQualityAgent()
+            ctx = SkillContext(
+                intent=IntentResult(
+                    intent="script_generation",
+                    confidence=0.9,
+                    slots={"category": "美妆", "scenario": "直播带货"},
+                ),
+                profile=InfluencerProfile(category="美妆"),
+                session=SessionContext(session_id="s-skill-empty"),
+                trace_id="trace-skill-empty",
+            )
+            result = await skill.execute(ctx)
+            assert result.success is False
+            assert "为空" in result.message
+
+        asyncio.run(_test())
+
     def test_skill_registry_schema_strict_validation(self):
         from script_agent.config.settings import settings
         from script_agent.skills.base import BaseSkill, SkillContext, SkillResult

@@ -20,6 +20,24 @@ def _load_json_dict(name: str, default: Dict) -> Dict:
     return value if isinstance(value, dict) else default
 
 
+def _resolve_qwen_model_by_env(env: str) -> str:
+    """开发/测试默认 0.5B，生产默认 7B，可通过环境变量覆盖。"""
+    env_key = (env or "").strip().lower()
+    if env_key == "production":
+        return os.getenv("QWEN_MODEL_PRODUCTION", "qwen2.5:7b")
+    return os.getenv("QWEN_MODEL_LOCAL", "qwen2.5:0.5b")
+
+
+def _default_ollama_model_map(env: str) -> Dict[str, str]:
+    model_name = _resolve_qwen_model_by_env(env)
+    return {
+        "美妆": model_name,
+        "食品": model_name,
+        "服饰": model_name,
+        "通用": model_name,
+    }
+
+
 @dataclass
 class LLMConfig:
     """LLM服务配置"""
@@ -28,7 +46,7 @@ class LLMConfig:
 
     # vLLM (生产环境)
     vllm_base_url: str = os.getenv("VLLM_BASE_URL", "http://vllm-service:8000/v1")
-    vllm_model: str = "Qwen/Qwen-7B"
+    vllm_model: str = os.getenv("VLLM_MODEL", "Qwen/Qwen-7B")
 
     # Ollama (开发/测试环境)
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -40,12 +58,11 @@ class LLMConfig:
         "服饰": "fashion-lora",
         "通用": "Qwen/Qwen-7B",
     })
-    ollama_model_map: Dict[str, str] = field(default_factory=lambda: {
-        "美妆": "qwen-beauty:7b",
-        "食品": "qwen-food:7b",
-        "服饰": "qwen-fashion:7b",
-        "通用": "qwen:7b",
-    })
+    ollama_model_map: Dict[str, str] = field(
+        default_factory=lambda: _default_ollama_model_map(
+            os.getenv("APP_ENV", "development")
+        )
+    )
 
     # 生成参数
     temperature: float = 0.7
@@ -62,7 +79,10 @@ class LLMConfig:
         "LLM_FALLBACK_BASE_URL",
         os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
     )
-    fallback_model: str = os.getenv("LLM_FALLBACK_MODEL", "qwen:7b")
+    fallback_model: str = os.getenv(
+        "LLM_FALLBACK_MODEL",
+        _resolve_qwen_model_by_env(os.getenv("APP_ENV", "development")),
+    )
 
     # 可靠性控制: 重试 / 超时 / 熔断 / 幂等
     retry_max_attempts: int = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))

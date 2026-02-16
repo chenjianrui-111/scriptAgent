@@ -476,6 +476,8 @@ class Orchestrator:
         result["quality_result"] = skill_result.quality_result
         result["intent"] = intent_result
         result["skill_used"] = skill_name
+        if not skill_result.success and skill_result.message:
+            result["error"] = skill_result.message
 
         if skill_result.script:
             session.add_turn(
