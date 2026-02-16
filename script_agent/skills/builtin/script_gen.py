@@ -88,11 +88,18 @@ class ScriptGenerationSkill(BaseSkill):
                 message=script_resp.payload.get("error_message", "话术生成失败"),
             )
         script: GeneratedScript = script_resp.payload.get("script", GeneratedScript())
+        min_chars = max(1, settings.llm.script_min_chars)
         if not script.content.strip():
             return SkillResult(
                 success=False,
                 script=script,
                 message="生成结果为空，请检查模型服务或提示词约束",
+            )
+        if len(script.content.strip()) < min_chars:
+            return SkillResult(
+                success=False,
+                script=script,
+                message=f"生成结果不足{min_chars}字，请重试",
             )
 
         # 质量校验 + 重试
@@ -122,7 +129,19 @@ class ScriptGenerationSkill(BaseSkill):
                     quality_result.suggestions if quality_result else []
                 )
                 script_resp = await self._script_agent(script_msg)
+                if script_resp.message_type == MessageType.ERROR:
+                    return SkillResult(
+                        success=False,
+                        script=script,
+                        message=script_resp.payload.get("error_message", "话术生成失败"),
+                    )
                 script = script_resp.payload.get("script", script)
+                if len(script.content.strip()) < min_chars:
+                    return SkillResult(
+                        success=False,
+                        script=script,
+                        message=f"重试后结果仍不足{min_chars}字",
+                    )
 
         return SkillResult(
             success=quality_result.passed if quality_result else False,

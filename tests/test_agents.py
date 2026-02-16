@@ -438,8 +438,8 @@ class TestOrchestrator:
                 product=None,
                 memory_hits=None,
             ):
-                yield "宝子们，"
-                yield "今天推荐小金瓶精华。"
+                yield "宝子们，今天给大家认真测评这款小金瓶精华，"
+                yield "上脸吸收快、提亮明显，直播间现在下单还有福利。"
 
         class DummyMemoryRetriever:
             async def remember_script(self, **kwargs):
@@ -485,7 +485,8 @@ class TestOrchestrator:
 
         content = asyncio.run(_run())
 
-        assert content == "宝子们，今天推荐小金瓶精华。"
+        assert "小金瓶精华" in content
+        assert len(content) >= 40
         assert len(session.turns) == 1
         assert session.turns[0].assistant_message == content
         assert session.workflow_snapshot.get("current_state") == "COMPLETED"
@@ -1011,6 +1012,107 @@ class TestEnterpriseFeatures:
             result = await skill.execute(ctx)
             assert result.success is False
             assert "为空" in result.message
+
+        asyncio.run(_test())
+
+    def test_script_generation_skill_fails_on_short_script(self):
+        from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
+        from script_agent.skills.base import SkillContext
+        from script_agent.models.context import InfluencerProfile, SessionContext
+        from script_agent.models.message import AgentMessage, GeneratedScript, IntentResult
+        from script_agent.config.settings import settings
+
+        class ShortScriptAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_response(
+                    payload={"script": GeneratedScript(content="太短了")},
+                    source="script_generation",
+                )
+
+        class DummyQualityAgent:
+            async def __call__(self, message: AgentMessage):
+                raise AssertionError("quality agent should not run on short script")
+
+        async def _test():
+            old_min_chars = settings.llm.script_min_chars
+            settings.llm.script_min_chars = 40
+            try:
+                skill = ScriptGenerationSkill()
+                skill._script_agent = ShortScriptAgent()
+                skill._quality_agent = DummyQualityAgent()
+                ctx = SkillContext(
+                    intent=IntentResult(
+                        intent="script_generation",
+                        confidence=0.9,
+                        slots={"category": "美妆", "scenario": "直播带货"},
+                    ),
+                    profile=InfluencerProfile(category="美妆"),
+                    session=SessionContext(session_id="s-skill-short"),
+                    trace_id="trace-skill-short",
+                )
+                result = await skill.execute(ctx)
+                assert result.success is False
+                assert "不足40字" in result.message
+            finally:
+                settings.llm.script_min_chars = old_min_chars
+
+        asyncio.run(_test())
+
+    def test_script_generation_agent_retries_then_fallback(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+        from script_agent.config.settings import settings
+        from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
+        from script_agent.models.message import AgentMessage, MessageType
+
+        class RetryThenFallbackLLM:
+            def __init__(self):
+                self.calls = []
+
+            async def generate_sync(
+                self,
+                prompt: str,
+                category: str = "通用",
+                max_tokens: int = 1024,
+                **kwargs,
+            ) -> str:
+                self.calls.append(bool(kwargs.get("prefer_fallback", False)))
+                if len(self.calls) == 1:
+                    return "太短"
+                if len(self.calls) == 2:
+                    raise RuntimeError("primary down")
+                return "这是一段来自兜底模型的完整话术内容，长度已经明显超过四十个字符，满足最小输出约束。"
+
+            async def generate(self, prompt: str, category: str = "通用", stream: bool = True, **kwargs):
+                yield ""
+
+        async def _test():
+            old_min = settings.llm.script_min_chars
+            old_attempts = settings.llm.script_primary_attempts
+            settings.llm.script_min_chars = 40
+            settings.llm.script_primary_attempts = 2
+            try:
+                agent = ScriptGenerationAgent()
+                fake_llm = RetryThenFallbackLLM()
+                agent.llm = fake_llm
+
+                msg = AgentMessage(
+                    trace_id="trace-retry-fallback",
+                    payload={
+                        "slots": {"category": "美妆", "scenario": "直播带货"},
+                        "profile": InfluencerProfile(category="美妆"),
+                        "product": ProductProfile(name="玻尿酸精华液", category="美妆"),
+                        "memory_hits": [],
+                        "session": SessionContext(session_id="s-retry-fallback"),
+                    },
+                )
+                resp = await agent(msg)
+                assert resp.message_type == MessageType.RESPONSE
+                script = resp.payload["script"]
+                assert len(script.content.strip()) >= 40
+                assert fake_llm.calls == [False, False, True]
+            finally:
+                settings.llm.script_min_chars = old_min
+                settings.llm.script_primary_attempts = old_attempts
 
         asyncio.run(_test())
 

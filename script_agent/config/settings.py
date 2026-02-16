@@ -83,6 +83,15 @@ class LLMConfig:
         "LLM_FALLBACK_MODEL",
         _resolve_qwen_model_by_env(os.getenv("APP_ENV", "development")),
     )
+    zhipu_base_url: str = os.getenv(
+        "ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"
+    )
+    zhipu_api_key: str = os.getenv("ZHIPU_API_KEY", "")
+    zhipu_model: str = os.getenv("ZHIPU_MODEL", "glm-4-flash")
+
+    # 话术生成兜底策略
+    script_min_chars: int = int(os.getenv("SCRIPT_MIN_CHARS", "40"))
+    script_primary_attempts: int = int(os.getenv("SCRIPT_PRIMARY_ATTEMPTS", "2"))
 
     # 可靠性控制: 重试 / 超时 / 熔断 / 幂等
     retry_max_attempts: int = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))

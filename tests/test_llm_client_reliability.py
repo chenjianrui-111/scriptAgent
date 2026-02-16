@@ -115,6 +115,23 @@ async def test_fallback_layer_when_primary_failed():
 
 
 @pytest.mark.asyncio
+async def test_prefer_fallback_routes_to_backup_model():
+    primary = DummyBackend(sync_plan=["from-primary"])
+    fallback = DummyBackend(sync_plan=["from-fallback-direct"])
+    client = _build_client(primary, fallback)
+
+    result = await client.generate_sync(
+        "prompt",
+        category="美妆",
+        prefer_fallback=True,
+    )
+
+    assert result == "from-fallback-direct"
+    assert primary.sync_calls == 0
+    assert fallback.sync_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_sync_idempotency_inflight_dedup():
     async def slow_result():
         await asyncio.sleep(0.05)

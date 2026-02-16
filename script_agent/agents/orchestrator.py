@@ -1270,7 +1270,8 @@ class Orchestrator:
 
             timing["script_generation"] = (time.perf_counter() - stream_start) * 1000
             content = "".join(chunks).strip()
-            if content:
+            min_chars = max(1, settings.llm.script_min_chars)
+            if content and len(content) >= min_chars:
                 state["script"] = GeneratedScript(
                     content=content,
                     category=(
@@ -1290,6 +1291,10 @@ class Orchestrator:
                     },
                 )
                 state["quality_result"] = None
+            elif content:
+                state["error"] = (
+                    f"stream output too short: {len(content)} < {min_chars}"
+                )
             else:
                 state["error"] = "empty stream output"
 

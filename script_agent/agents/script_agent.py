@@ -227,6 +227,8 @@ class ScriptGenerationAgent(BaseAgent):
         self.prompt_builder = PromptBuilder()
         self.sensitive_filter = SensitiveWordFilter()
         self.context_compressor = SessionContextCompressor()
+        self.min_chars = max(1, settings.llm.script_min_chars)
+        self.primary_attempts = max(1, settings.llm.script_primary_attempts)
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         intent_slots = message.payload.get("slots", {})
@@ -250,9 +252,11 @@ class ScriptGenerationAgent(BaseAgent):
         )
         logger.info(f"Built prompt ({len(prompt)} chars) for category={category}")
 
-        # 2. 调用LLM生成 (LoRA按category动态切换)
-        generated_text = await self.llm.generate_sync(
-            prompt, category=category, max_tokens=800,
+        # 2. 调用LLM生成 (失败重试2次后切兜底模型)
+        generated_text = await self._generate_with_retry(
+            prompt=prompt,
+            category=category,
+            request_id=message.trace_id or message.message_id,
         )
 
         # 3. 敏感词检测
@@ -262,6 +266,11 @@ class ScriptGenerationAgent(BaseAgent):
             # 简单替换
             for word in sensitive:
                 generated_text = generated_text.replace(word, "***")
+        if len(generated_text.strip()) < self.min_chars:
+            raise RuntimeError(
+                f"generated content too short after filtering: "
+                f"{len(generated_text.strip())} < {self.min_chars}"
+            )
 
         # 4. 封装结果
         script = GeneratedScript(
@@ -304,15 +313,106 @@ class ScriptGenerationAgent(BaseAgent):
             compressed_context=compressed_context,
         )
 
-        buffer = ""
-        async for token in self.llm.generate(prompt, category=category):
-            buffer += token
-            # 实时敏感词检测
-            if self.sensitive_filter.contains_sensitive(buffer):
-                logger.warning("Sensitive content detected during streaming")
-                yield "[内容涉及敏感词，已终止生成]"
-                return
-            yield token
+        content = await self._generate_with_retry(
+            prompt=prompt,
+            category=category,
+            request_id=f"{session.session_id}:stream",
+            stream_mode=True,
+        )
+        sensitive = self.sensitive_filter.contains_sensitive(content)
+        if sensitive:
+            logger.warning("Sensitive content detected during streaming")
+            yield "[内容涉及敏感词，已终止生成]"
+            return
+        # 以固定窗口输出，保留流式接口兼容性。
+        chunk_size = 16
+        for i in range(0, len(content), chunk_size):
+            yield content[i:i + chunk_size]
+
+    async def _generate_once(
+        self,
+        prompt: str,
+        category: str,
+        request_id: str,
+        *,
+        prefer_fallback: bool = False,
+        stream_mode: bool = False,
+    ) -> str:
+        if not stream_mode:
+            return await self.llm.generate_sync(
+                prompt,
+                category=category,
+                max_tokens=800,
+                request_id=request_id,
+                prefer_fallback=prefer_fallback,
+            )
+
+        buffer = []
+        async for token in self.llm.generate(
+            prompt,
+            category=category,
+            request_id=request_id,
+            prefer_fallback=prefer_fallback,
+        ):
+            buffer.append(token)
+        return "".join(buffer)
+
+    async def _generate_with_retry(
+        self,
+        prompt: str,
+        category: str,
+        request_id: str,
+        *,
+        stream_mode: bool = False,
+    ) -> str:
+        last_error: Optional[Exception] = None
+        for idx in range(1, self.primary_attempts + 1):
+            try:
+                text = (
+                    await self._generate_once(
+                        prompt,
+                        category,
+                        f"{request_id}:primary:{idx}",
+                        prefer_fallback=False,
+                        stream_mode=stream_mode,
+                    )
+                ).strip()
+                if len(text) < self.min_chars:
+                    raise RuntimeError(
+                        f"generated content too short: {len(text)} < {self.min_chars}"
+                    )
+                return text
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "script generation primary attempt failed (%s/%s): %s",
+                    idx,
+                    self.primary_attempts,
+                    exc,
+                )
+
+        try:
+            fallback_text = (
+                await self._generate_once(
+                    prompt,
+                    category,
+                    f"{request_id}:fallback",
+                    prefer_fallback=True,
+                    stream_mode=stream_mode,
+                )
+            ).strip()
+            if len(fallback_text) < self.min_chars:
+                raise RuntimeError(
+                    f"fallback generated content too short: "
+                    f"{len(fallback_text)} < {self.min_chars}"
+                )
+            return fallback_text
+        except Exception as exc:
+            if last_error is None:
+                last_error = exc
+            raise RuntimeError(
+                "script generation failed after retries and fallback"
+            ) from last_error
 
     async def _compress_session_memory(
         self,

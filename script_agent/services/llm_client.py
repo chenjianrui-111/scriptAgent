@@ -16,7 +16,7 @@ import random
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import AsyncGenerator, Dict, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
 import aiohttp
 
@@ -308,7 +308,7 @@ class OllamaBackend(LLMBackend):
         self.model_map = model_map
 
     def _get_model_name(self, category: str) -> str:
-        return self.model_map.get(category, "qwen:7b")
+        return self.model_map.get(category, "qwen2.5:0.5b")
 
     async def generate(self, prompt: str, category: str = "通用",
                        stream: bool = True, **kwargs) -> AsyncGenerator[str, None]:
@@ -368,6 +368,139 @@ class OllamaBackend(LLMBackend):
             session = await self._get_session()
             async with session.get(f"{self.base_url}/api/tags") as resp:
                 await self._ensure_success(resp, "ollama")
+                return {"status": "healthy", "models": await resp.json()}
+        except Exception as e:
+            return {"status": "unhealthy", "error": str(e)}
+
+
+class ZhipuBackend(LLMBackend):
+    """
+    智谱大模型后端（OpenAI-compatible Chat Completions）
+    文档接口: /chat/completions
+    """
+
+    def __init__(self, base_url: str, api_key: str, model: str):
+        super().__init__()
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key.strip()
+        self.model = model
+
+    def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if extra:
+            headers.update(extra)
+        return headers
+
+    def _extract_text(self, data: Dict[str, Any]) -> str:
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        msg = choices[0].get("message", {})
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+
+    async def generate(
+        self,
+        prompt: str,
+        category: str = "通用",
+        stream: bool = True,
+        **kwargs,
+    ) -> AsyncGenerator[str, None]:
+        if not self.api_key:
+            raise LLMCallError(
+                "zhipu api key missing, set ZHIPU_API_KEY",
+                retryable=False,
+                fallback_eligible=False,
+                backend_name="zhipu",
+                category=category,
+            )
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": kwargs.get("temperature", settings.llm.temperature),
+            "top_p": kwargs.get("top_p", settings.llm.top_p),
+            "max_tokens": kwargs.get("max_tokens", settings.llm.max_tokens),
+            "stream": stream,
+        }
+        timeout = kwargs.get("timeout")
+        headers = self._headers(kwargs.get("headers"))
+
+        session = await self._get_session()
+        async with session.post(
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            timeout=timeout,
+            headers=headers,
+        ) as resp:
+            await self._ensure_success(resp, "zhipu")
+            if not stream:
+                data = await resp.json(content_type=None)
+                yield self._extract_text(data)
+                return
+
+            async for line in resp.content:
+                raw = line.decode("utf-8").strip()
+                if not raw or not raw.startswith("data:"):
+                    continue
+                body = raw[5:].strip()
+                if body == "[DONE]":
+                    return
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError as exc:
+                    raise LLMCallError(
+                        f"zhipu stream payload decode failed: {exc}",
+                        retryable=True,
+                        fallback_eligible=True,
+                        backend_name="zhipu",
+                        category=category,
+                    ) from exc
+                choices = data.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                token = delta.get("content", "")
+                if token:
+                    yield str(token)
+
+    async def generate_sync(
+        self,
+        prompt: str,
+        category: str = "通用",
+        max_tokens: int = 1024,
+        **kwargs,
+    ) -> str:
+        result = ""
+        async for token in self.generate(
+            prompt, category, stream=False, max_tokens=max_tokens, **kwargs
+        ):
+            result += token
+        return result
+
+    async def health_check(self) -> Dict:
+        if not self.api_key:
+            return {"status": "unhealthy", "error": "missing ZHIPU_API_KEY"}
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.base_url}/models",
+                headers=self._headers(),
+            ) as resp:
+                await self._ensure_success(resp, "zhipu")
                 return {"status": "healthy", "models": await resp.json()}
         except Exception as e:
             return {"status": "unhealthy", "error": str(e)}
@@ -436,6 +569,12 @@ class LLMServiceClient:
             return OllamaBackend(
                 base_url=settings.llm.fallback_base_url,
                 model_map={"通用": settings.llm.fallback_model},
+            )
+        if backend_type == "zhipu":
+            return ZhipuBackend(
+                base_url=settings.llm.zhipu_base_url,
+                api_key=settings.llm.zhipu_api_key,
+                model=settings.llm.zhipu_model,
             )
 
         logger.warning("Unsupported fallback backend: %s", backend_type)
@@ -559,7 +698,23 @@ class LLMServiceClient:
     def _can_try_next_layer(self, err: LLMCallError) -> bool:
         return err.fallback_eligible
 
-    def _build_layer_plans(self, category: str) -> Tuple[_LayerPlan, ...]:
+    def _build_layer_plans(
+        self,
+        category: str,
+        prefer_fallback: bool = False,
+    ) -> Tuple[_LayerPlan, ...]:
+        fallback_plan: Optional[_LayerPlan] = None
+        if self._fallback_backend is not None:
+            fallback_plan = _LayerPlan(
+                name="fallback-backend",
+                backend=self._fallback_backend,
+                category=category if settings.llm.fallback_keep_category else "通用",
+                breaker=self._fallback_breaker,
+            )
+
+        if prefer_fallback and fallback_plan is not None:
+            return (fallback_plan,)
+
         layers = [
             _LayerPlan(
                 name="primary",
@@ -577,15 +732,8 @@ class LLMServiceClient:
                     breaker=self._primary_breaker,
                 )
             )
-        if self._fallback_backend is not None:
-            layers.append(
-                _LayerPlan(
-                    name="fallback-backend",
-                    backend=self._fallback_backend,
-                    category=category if settings.llm.fallback_keep_category else "通用",
-                    breaker=self._fallback_breaker,
-                )
-            )
+        if fallback_plan is not None:
+            layers.append(fallback_plan)
         return tuple(layers)
 
     async def _run_sync_idempotent(
@@ -730,13 +878,14 @@ class LLMServiceClient:
 
         request_id = kwargs.pop("request_id", None)
         explicit_key = kwargs.pop("idempotency_key", None)
+        prefer_fallback = bool(kwargs.pop("prefer_fallback", False))
         idempotency_key = self._resolve_idempotency_key(
             prompt=prompt,
             category=category,
             request_id=request_id,
             explicit_key=explicit_key,
         )
-        plans = self._build_layer_plans(category)
+        plans = self._build_layer_plans(category, prefer_fallback=prefer_fallback)
         last_error: Optional[LLMCallError] = None
 
         for idx, plan in enumerate(plans):
@@ -772,13 +921,14 @@ class LLMServiceClient:
         """统一同步生成接口"""
         request_id = kwargs.pop("request_id", None)
         explicit_key = kwargs.pop("idempotency_key", None)
+        prefer_fallback = bool(kwargs.pop("prefer_fallback", False))
         idempotency_key = self._resolve_idempotency_key(
             prompt=prompt,
             category=category,
             request_id=request_id,
             explicit_key=explicit_key,
         )
-        plans = self._build_layer_plans(category)
+        plans = self._build_layer_plans(category, prefer_fallback=prefer_fallback)
 
         async def _run_layers() -> str:
             last_error: Optional[LLMCallError] = None
