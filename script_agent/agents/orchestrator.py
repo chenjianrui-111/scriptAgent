@@ -397,6 +397,40 @@ class Orchestrator:
         if skill is None:
             raise RuntimeError(f"skill not found: {skill_name}")
 
+        actor_role = self._resolve_actor_role(session, intent_result)
+        preflight_error = self.skill_registry.preflight(
+            skill=skill,
+            slots=intent_result.slots,
+            tenant_id=session.tenant_id,
+            role=actor_role,
+            query=query,
+        )
+        if preflight_error:
+            logger.warning(
+                "[%s] skill preflight blocked skill=%s reason=%s",
+                trace_id,
+                skill_name,
+                preflight_error,
+            )
+            timing = dict(state.get("timing", {}))
+            timing["skill_execution"] = (time.perf_counter() - t0) * 1000
+            denied_result = SkillResult(success=False, message=preflight_error)
+            result = dict(state.get("result", {}))
+            result["success"] = False
+            result["error"] = preflight_error
+            result["skill_used"] = skill_name
+            result["intent"] = intent_result
+
+            updates = {
+                "state_history": history,
+                "current_state": current_state,
+                "timing": timing,
+                "skill_result": denied_result,
+                "result": result,
+            }
+            await self._write_checkpoint({**state, **updates}, status="failed")
+            return updates
+
         profile = state.get("profile")
         if profile is None:
             profile = await self.profile_agent.fetch(intent_result.slots)
@@ -424,6 +458,8 @@ class Orchestrator:
             profile=profile,
             session=session,
             trace_id=trace_id,
+            query=query,
+            role=actor_role,
             extra={
                 "product": product,
                 "memory_hits": memory_hits,
@@ -466,6 +502,21 @@ class Orchestrator:
         }
         await self._write_checkpoint({**state, **updates}, status="in_progress")
         return updates
+
+    def _resolve_actor_role(
+        self,
+        session: SessionContext,
+        intent_result: IntentResult,
+    ) -> str:
+        slots = intent_result.slots if intent_result else {}
+        role = ""
+        if isinstance(slots, dict):
+            role = str(slots.get("_role", "")).strip()
+        if not role:
+            role = str((session.workflow_snapshot or {}).get("actor_role", "")).strip()
+        if not role:
+            role = settings.tool_security.default_role or "user"
+        return role
 
     async def _node_profile_fetching(
         self,

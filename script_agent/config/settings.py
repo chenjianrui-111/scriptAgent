@@ -3,9 +3,21 @@
 支持通过环境变量切换 开发/测试/生产 环境
 """
 
+import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, List
+
+
+def _load_json_dict(name: str, default: Dict) -> Dict:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return default
+    return value if isinstance(value, dict) else default
 
 
 @dataclass
@@ -298,6 +310,44 @@ class LongTermMemoryConfig:
 
 
 @dataclass
+class ToolSecurityConfig:
+    """工具调用安全配置（schema + allowlist + 注入防护）"""
+
+    schema_strict_enabled: bool = (
+        os.getenv("TOOL_SCHEMA_STRICT_ENABLED", "true").lower() == "true"
+    )
+    allowlist_enabled: bool = (
+        os.getenv("TOOL_ALLOWLIST_ENABLED", "true").lower() == "true"
+    )
+    default_role: str = os.getenv("TOOL_DEFAULT_ROLE", "user")
+    # 格式: {"user":["script_generation"],"admin":["*"]}
+    role_allowlist: Dict[str, List[str]] = field(
+        default_factory=lambda: _load_json_dict(
+            "TOOL_ROLE_ALLOWLIST_JSON",
+            {
+                "user": ["script_generation", "script_modification", "batch_generate"],
+                "service": ["script_generation", "script_modification", "batch_generate"],
+                "admin": ["*"],
+            },
+        )
+    )
+    # 格式: {"tenant_demo":["script_generation","script_modification"]}
+    tenant_allowlist: Dict[str, List[str]] = field(
+        default_factory=lambda: _load_json_dict("TOOL_TENANT_ALLOWLIST_JSON", {})
+    )
+
+    prompt_injection_tripwire_enabled: bool = (
+        os.getenv("TOOL_PROMPT_TRIPWIRE_ENABLED", "true").lower() == "true"
+    )
+    prompt_injection_threshold: int = int(
+        os.getenv("TOOL_PROMPT_TRIPWIRE_THRESHOLD", "1")
+    )
+    slot_text_max_chars: int = int(
+        os.getenv("TOOL_SLOT_TEXT_MAX_CHARS", "5000")
+    )
+
+
+@dataclass
 class AppConfig:
     """应用总配置"""
     app_name: str = "script_agent"
@@ -317,6 +367,7 @@ class AppConfig:
     longterm_memory: LongTermMemoryConfig = field(
         default_factory=LongTermMemoryConfig
     )
+    tool_security: ToolSecurityConfig = field(default_factory=ToolSecurityConfig)
 
 
 # 全局配置单例

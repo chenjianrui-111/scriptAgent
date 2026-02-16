@@ -16,6 +16,23 @@ class ScriptModificationSkill(BaseSkill):
     display_name = "话术修改"
     description = "修改已生成的话术内容"
     required_slots = []
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "requirements": {"type": "string", "maxLength": 2000},
+            "_raw_query": {"type": "string", "maxLength": 2000},
+            "_continuation": {"type": "boolean"},
+            "_category_source": {"type": "string", "maxLength": 32},
+            "category": {"type": "string", "maxLength": 32},
+            "scenario": {"type": "string", "maxLength": 64},
+            "sub_scenario": {"type": "string", "maxLength": 64},
+            "style_hint": {"type": "string", "maxLength": 200},
+            "product_name": {"type": "string", "maxLength": 128},
+            "target_name": {"type": "string", "maxLength": 64},
+        },
+        "required": [],
+        "additionalProperties": False,
+    }
 
     def __init__(self):
         self._llm = LLMServiceClient()

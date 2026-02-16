@@ -182,6 +182,10 @@ async def generate_script(
     try:
         async with session_lock_manager.acquire(req.session_id):
             session = await _load_session_with_tenant_check(req.session_id, auth)
+            session.workflow_snapshot = {
+                **(session.workflow_snapshot or {}),
+                "actor_role": auth.role,
+            }
             result = await orchestrator.handle_request(
                 query=req.query,
                 session=session,
@@ -235,6 +239,10 @@ async def generate_script_stream(
         try:
             async with session_lock_manager.acquire(req.session_id):
                 session = await _load_session_with_tenant_check(req.session_id, auth)
+                session.workflow_snapshot = {
+                    **(session.workflow_snapshot or {}),
+                    "actor_role": auth.role,
+                }
                 async for token in orchestrator.handle_stream(
                     query=req.query,
                     session=session,

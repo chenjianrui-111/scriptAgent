@@ -26,6 +26,8 @@ class SkillContext:
     profile: InfluencerProfile
     session: SessionContext
     trace_id: str = ""
+    query: str = ""
+    role: str = "user"
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -55,6 +57,7 @@ class BaseSkill(ABC):
     display_name: str = ""
     description: str = ""
     required_slots: List[str] = []
+    input_schema: Dict[str, Any] = {}
 
     def can_handle(self, intent: str, slots: Dict[str, Any]) -> float:
         """
@@ -73,6 +76,21 @@ class BaseSkill(ABC):
         if missing:
             return f"缺少必要信息: {', '.join(missing)}"
         return None
+
+    def get_input_schema(self) -> Dict[str, Any]:
+        """
+        返回工具输入 schema。
+        子类可通过 `input_schema` 定义严格约束。
+        """
+        if self.input_schema:
+            return self.input_schema
+        props = {name: {"type": "string", "minLength": 1} for name in self.required_slots}
+        return {
+            "type": "object",
+            "properties": props,
+            "required": list(self.required_slots),
+            "additionalProperties": True,
+        }
 
     @abstractmethod
     async def execute(self, context: SkillContext) -> SkillResult:

@@ -17,6 +17,31 @@ class BatchGenerateSkill(BaseSkill):
     display_name = "批量生成"
     description = "一次性生成开场、产品介绍、促销等多场景话术"
     required_slots = ["category"]
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string", "minLength": 1, "maxLength": 32},
+            "requirements": {"type": "string", "maxLength": 2000},
+            "_raw_query": {"type": "string", "maxLength": 2000},
+            "_continuation": {"type": "boolean"},
+            "_category_source": {"type": "string", "maxLength": 32},
+            "style_hint": {"type": "string", "maxLength": 200},
+            "product_name": {"type": "string", "maxLength": 128},
+            "scenario": {"type": "string", "maxLength": 64},
+            "sub_scenario": {"type": "string", "maxLength": 64},
+            "event": {"type": "string", "maxLength": 64},
+            "selling_points": {
+                "type": ["array", "string"],
+                "items": {"type": "string", "maxLength": 120},
+            },
+            "product_features": {
+                "type": ["array", "string"],
+                "items": {"type": "string", "maxLength": 120},
+            },
+        },
+        "required": ["category"],
+        "additionalProperties": False,
+    }
 
     SCENARIOS = ["开场话术", "产品介绍", "促销话术", "种草文案"]
 

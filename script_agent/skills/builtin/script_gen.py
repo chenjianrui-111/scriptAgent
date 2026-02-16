@@ -18,6 +18,38 @@ class ScriptGenerationSkill(BaseSkill):
     display_name = "话术生成"
     description = "根据品类、场景、达人风格生成话术"
     required_slots = ["category", "scenario"]
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string", "minLength": 1, "maxLength": 32},
+            "scenario": {"type": "string", "minLength": 1, "maxLength": 64},
+            "sub_scenario": {"type": "string", "maxLength": 64},
+            "event": {"type": "string", "maxLength": 64},
+            "requirements": {"type": "string", "maxLength": 2000},
+            "style_hint": {"type": "string", "maxLength": 200},
+            "product_name": {"type": "string", "maxLength": 128},
+            "product_id": {"type": "string", "maxLength": 64},
+            "target_name": {"type": "string", "maxLength": 64},
+            "brand": {"type": "string", "maxLength": 64},
+            "price_range": {"type": "string", "maxLength": 64},
+            "target_audience": {"type": "string", "maxLength": 128},
+            "selling_points": {
+                "type": ["array", "string"],
+                "items": {"type": "string", "maxLength": 120},
+            },
+            "product_features": {
+                "type": ["array", "string"],
+                "items": {"type": "string", "maxLength": 120},
+            },
+            "_raw_query": {"type": "string", "maxLength": 2000},
+            "_continuation": {"type": "boolean"},
+            "_category_source": {"type": "string", "maxLength": 32},
+            "intent": {"type": "string", "maxLength": 64},
+            "target_id": {"type": "string", "maxLength": 64},
+        },
+        "required": ["category", "scenario"],
+        "additionalProperties": False,
+    }
 
     def __init__(self):
         self._script_agent = ScriptGenerationAgent()

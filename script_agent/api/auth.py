@@ -42,6 +42,7 @@ class AuthContext:
     """请求认证上下文 — 注入到每个 API handler"""
     tenant_id: str
     auth_method: str              # "api_key" | "jwt"
+    role: str = "user"
     tenant_info: Optional[TenantInfo] = None
 
 
@@ -196,6 +197,7 @@ async def get_auth_context(
         return AuthContext(
             tenant_id=tenant_id,
             auth_method="dev_bypass",
+            role=request.headers.get("X-Role", "admin"),
         )
 
     # 方式1: API Key
@@ -210,6 +212,7 @@ async def get_auth_context(
         return AuthContext(
             tenant_id=tenant.tenant_id,
             auth_method="api_key",
+            role="service",
             tenant_info=tenant,
         )
 
@@ -226,6 +229,7 @@ async def get_auth_context(
         return AuthContext(
             tenant_id=tenant_id,
             auth_method="jwt",
+            role=payload.get("role", "user"),
         )
 
     raise HTTPException(

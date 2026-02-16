@@ -16,6 +16,11 @@
 - 新增 `tests/test_llm_client_reliability.py`，覆盖重试、降级、幂等并发去重、断路器开启场景。
 - 长期记忆检索新增混合召回能力（dense vector + sparse BM25）及轻量 rerank 流程，支持按场景/意图/商品动态调整 top-k。
 - 新增会话记忆“任务相关性驱动”裁剪策略：基于 query/product/intent/recency 评分，优先保留高相关轮次。
+- 新增工具调用安全模块 `script_agent/skills/security.py`：
+  - strict JSON schema 校验器
+  - tenant/role allowlist policy engine
+  - prompt injection tripwire
+- 新增工具调用安全测试用例（schema/allowlist/tripwire）。
 
 ### Changed
 
@@ -28,6 +33,10 @@
 - `Orchestrator.handle_stream` 对齐同步链路：支持 `checkpoint_loader/checkpoint_writer/checkpoint_saver`，checkpoint 中状态序列与审计字段统一（含 `PRODUCT_FETCHING`）。
 - `script_agent/services/long_term_memory.py` 引入 hybrid fuse + rerank + adaptive top-k，memory/elasticsearch 后端统一支持 sparse 召回接口。
 - `script_agent/services/session_manager.py` 裁剪策略升级为 relevance-aware：高相关旧轮次可被保留且避免过度压缩。
+- `SkillRegistry` 升级为统一工具治理入口，所有 Skill 在执行前都经过 preflight（required slots + schema + policy + tripwire）。
+- `Orchestrator` 的 skill 执行路径接入统一 preflight，拦截结果进入 checkpoint/audit 链路。
+- `AuthContext` 增加 `role`，并在 API 层将角色注入会话快照供 tool policy 使用。
+- 内置技能 (`script_gen`/`script_modify`/`batch_generate`) 新增严格输入 schema 定义。
 
 ### Fixed
 
