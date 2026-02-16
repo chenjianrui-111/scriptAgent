@@ -103,6 +103,7 @@ const PRESET_PRODUCTS = [
 ];
 
 const BOT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+const CLIENT_CONFIG_KEY = 'script_agent_frontend_config_v1';
 
 // ── State ─────────────────────────────────────────────────
 
@@ -125,6 +126,14 @@ const textInputWrap = document.getElementById('textInputWrap');
 const userInput     = document.getElementById('userInput');
 const sendBtn       = document.getElementById('sendBtn');
 const newSessionBtn = document.getElementById('newSessionBtn');
+const connToggleBtn = document.getElementById('connToggleBtn');
+const connPanel = document.getElementById('connPanel');
+const apiBaseUrl = document.getElementById('apiBaseUrl');
+const tenantIdInput = document.getElementById('tenantIdInput');
+const roleInput = document.getElementById('roleInput');
+const apiKeyInput = document.getElementById('apiKeyInput');
+const bearerTokenInput = document.getElementById('bearerTokenInput');
+const saveConnBtn = document.getElementById('saveConnBtn');
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -144,6 +153,32 @@ function hideAllInputs() {
   quickReplies.classList.add('hidden');
   quickReplies.innerHTML = '';
   textInputWrap.classList.add('hidden');
+}
+
+function loadClientConfig() {
+  try {
+    const raw = localStorage.getItem(CLIENT_CONFIG_KEY);
+    if (!raw) return;
+    const cfg = JSON.parse(raw);
+    apiBaseUrl.value = cfg.baseUrl || '';
+    tenantIdInput.value = cfg.tenantId || 'tenant_dev';
+    roleInput.value = cfg.role || 'admin';
+    apiKeyInput.value = cfg.apiKey || '';
+    bearerTokenInput.value = cfg.bearerToken || '';
+  } catch (_) {
+    // ignore invalid cache
+  }
+}
+
+function saveClientConfig() {
+  const cfg = {
+    baseUrl: (apiBaseUrl.value || '').trim(),
+    tenantId: (tenantIdInput.value || '').trim() || 'tenant_dev',
+    role: (roleInput.value || '').trim() || 'admin',
+    apiKey: (apiKeyInput.value || '').trim(),
+    bearerToken: (bearerTokenInput.value || '').trim(),
+  };
+  localStorage.setItem(CLIENT_CONFIG_KEY, JSON.stringify(cfg));
 }
 
 // ── Message Rendering ─────────────────────────────────────
@@ -271,16 +306,30 @@ function showTextInput(placeholder) {
 
 // ── API Layer ─────────────────────────────────────────────
 
+function buildApiUrl(path) {
+  const base = (apiBaseUrl && apiBaseUrl.value ? apiBaseUrl.value : '').trim();
+  if (!base) return path;
+  return base.replace(/\/+$/, '') + path;
+}
+
 function collectHeaders() {
-  return {
+  const headers = {
     'Content-Type': 'application/json',
-    'X-Tenant-Id': 'tenant_dev',
-    'X-Role': 'admin',
   };
+  const tenantId = (tenantIdInput && tenantIdInput.value ? tenantIdInput.value : '').trim();
+  const role = (roleInput && roleInput.value ? roleInput.value : '').trim();
+  const apiKey = (apiKeyInput && apiKeyInput.value ? apiKeyInput.value : '').trim();
+  const bearerToken = (bearerTokenInput && bearerTokenInput.value ? bearerTokenInput.value : '').trim();
+
+  if (tenantId) headers['X-Tenant-Id'] = tenantId;
+  if (role) headers['X-Role'] = role;
+  if (apiKey) headers['X-API-Key'] = apiKey;
+  if (bearerToken) headers.Authorization = 'Bearer ' + bearerToken;
+  return headers;
 }
 
 async function createSession(influencerName, category) {
-  const res = await fetch('/api/v1/sessions', {
+  const res = await fetch(buildApiUrl('/api/v1/sessions'), {
     method: 'POST',
     headers: collectHeaders(),
     body: JSON.stringify({
@@ -294,7 +343,7 @@ async function createSession(influencerName, category) {
 }
 
 async function generateStream(sessionId, query, onToken, onDone, onError) {
-  const res = await fetch('/api/v1/generate/stream', {
+  const res = await fetch(buildApiUrl('/api/v1/generate/stream'), {
     method: 'POST',
     headers: collectHeaders(),
     body: JSON.stringify({ session_id: sessionId, query: query }),
@@ -380,7 +429,7 @@ async function doStreamGeneration(query) {
       },
       function onError(errorMsg) {
         finalizeStreamingMessage(msgId);
-        addAssistantMessage('\u751f\u6210\u51fa\u73b0\u95ee\u9898\uff0c\u8bf7\u91cd\u8bd5\u3002');
+        addAssistantMessage('\u751f\u6210\u51fa\u73b0\u95ee\u9898\uff1a' + errorMsg);
         appState.flowState = FLOW.CHAT;
         appState.isStreaming = false;
         showTextInput();
@@ -541,9 +590,20 @@ newSessionBtn.addEventListener('click', () => {
   init();
 });
 
+connToggleBtn.addEventListener('click', () => {
+  connPanel.classList.toggle('hidden');
+});
+
+saveConnBtn.addEventListener('click', () => {
+  saveClientConfig();
+  addAssistantMessage('\u8fde\u63a5\u914d\u7f6e\u5df2\u4fdd\u5b58\u3002');
+  connPanel.classList.add('hidden');
+});
+
 // ── Initialization ────────────────────────────────────────
 
 async function init() {
+  loadClientConfig();
   chatArea.innerHTML = '';
   hideAllInputs();
 

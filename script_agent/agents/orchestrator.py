@@ -963,7 +963,13 @@ class Orchestrator:
             return {}
         if snapshot.get("status") not in {"in_progress", "failed"}:
             return {}
-        if snapshot.get("status") == "in_progress" and not self._is_snapshot_fresh(snapshot):
+        # 兼容旧快照：仅在存在 updated_at 且判定过期时，才拒绝恢复。
+        # 旧版本快照可能没有 updated_at，但仍然包含可恢复状态。
+        if (
+            snapshot.get("status") == "in_progress"
+            and snapshot.get("updated_at")
+            and not self._is_snapshot_fresh(snapshot)
+        ):
             return {}
 
         seed: Dict[str, Any] = {}

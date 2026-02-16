@@ -22,13 +22,44 @@
         </svg>
         <span class="logo-text">ScriptAgent</span>
       </div>
-      <button id="newSessionBtn" class="btn-icon" title="新对话">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="1 4 1 10 7 10"/>
-          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
-        </svg>
-      </button>
+      <div class="header-actions">
+        <button id="connToggleBtn" class="btn-pill" title="连接配置">连接配置</button>
+        <button id="newSessionBtn" class="btn-icon" title="新对话">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+          </svg>
+        </button>
+      </div>
     </header>
+
+    <section id="connPanel" class="conn-panel hidden" aria-label="连接配置">
+      <div class="conn-grid">
+        <label>
+          Base URL
+          <input id="apiBaseUrl" type="text" placeholder="默认同源，例如 https://agent.example.com" />
+        </label>
+        <label>
+          Tenant ID
+          <input id="tenantIdInput" type="text" value="tenant_dev" />
+        </label>
+        <label>
+          Role
+          <input id="roleInput" type="text" value="admin" />
+        </label>
+        <label>
+          API Key
+          <input id="apiKeyInput" type="password" placeholder="生产环境建议填写" />
+        </label>
+        <label>
+          Bearer Token
+          <input id="bearerTokenInput" type="password" placeholder="可选" />
+        </label>
+      </div>
+      <div class="conn-actions">
+        <button id="saveConnBtn" class="btn-pill btn-pill-primary">保存连接配置</button>
+      </div>
+    </section>
 
     <main id="chatArea" class="chat-area"></main>
 
