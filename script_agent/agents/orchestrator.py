@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, Optional, TypedDict
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, TypedDict
 
 from script_agent.agents.intent_agent import IntentRecognitionAgent
 from script_agent.agents.product_agent import ProductAgent
@@ -1256,54 +1256,133 @@ class Orchestrator:
             profile = state.get("profile", InfluencerProfile())
             product = state.get("product", ProductProfile())
             memory_hits = list(state.get("memory_hits", []))
-
-            chunks: list[str] = []
-            try:
-                async for token in self.script_agent.generate_stream(
-                    intent_result.slots,
-                    profile,
-                    session,
-                    product=product,
-                    memory_hits=memory_hits,
-                ):
-                    chunks.append(token)
-            except Exception as gen_exc:
-                logger.error(
-                    "[%s] Script generate_stream failed: %s",
-                    trace_id, gen_exc, exc_info=True,
-                )
-                if not chunks:
-                    yield "[生成失败] 话术生成服务暂时不可用，请稍后重试"
-                state["error"] = str(gen_exc)
-
-            timing["script_generation"] = (time.perf_counter() - stream_start) * 1000
-            content = "".join(chunks).strip()
+            base_slots = dict(intent_result.slots)
+            quality_feedback: List[str] = []
             min_chars = max(1, settings.llm.script_min_chars)
-            if content and len(content) >= min_chars:
-                for token in chunks:
-                    yield token
-                state["script"] = GeneratedScript(
+            max_attempts = max(1, settings.quality.max_retries + 1)
+            final_chunks: List[str] = []
+            final_script: Optional[GeneratedScript] = None
+            final_quality: Optional[QualityResult] = None
+            best_script: Optional[GeneratedScript] = None
+            best_quality: Optional[QualityResult] = None
+
+            for attempt in range(1, max_attempts + 1):
+                attempt_slots = dict(base_slots)
+                if quality_feedback:
+                    attempt_slots["requirements"] = self._merge_requirements_feedback(
+                        str(base_slots.get("requirements", "")),
+                        quality_feedback,
+                    )
+
+                chunks: List[str] = []
+                try:
+                    async for token in self.script_agent.generate_stream(
+                        attempt_slots,
+                        profile,
+                        session,
+                        product=product,
+                        memory_hits=memory_hits,
+                    ):
+                        chunks.append(token)
+                except Exception as gen_exc:
+                    logger.error(
+                        "[%s] Script generate_stream failed (attempt=%s/%s): %s",
+                        trace_id,
+                        attempt,
+                        max_attempts,
+                        gen_exc,
+                        exc_info=True,
+                    )
+                    state["error"] = str(gen_exc)
+                    if attempt >= max_attempts:
+                        break
+                    quality_feedback = ["请只输出完整的口播正文，不要输出提示词或结构化字段。"]
+                    continue
+
+                content = "".join(chunks).strip()
+                if not content:
+                    if attempt >= max_attempts:
+                        break
+                    quality_feedback = [
+                        "请输出完整正文，不要留空。",
+                        "请至少输出一段完整可口播文案。",
+                    ]
+                    continue
+
+                script = GeneratedScript(
                     content=content,
                     category=(
-                        intent_result.slots.get("category")
+                        attempt_slots.get("category")
                         or profile.category
                         or session.category
                         or "通用"
                     ),
-                    scenario=intent_result.slots.get("scenario", "stream_generation"),
+                    scenario=attempt_slots.get("scenario", "stream_generation"),
                     style_keywords=self._extract_style_keywords(
-                        intent_result.slots.get("style_hint")
+                        attempt_slots.get("style_hint")
                     ),
                     turn_index=len(session.turns),
                     generation_params={
                         "streaming": True,
                         "memory_hits": len(memory_hits),
+                        "attempt": attempt,
+                        "product_name": str(attempt_slots.get("product_name", "")).strip(),
+                        "product_switch": bool(attempt_slots.get("_product_switch")),
+                        "previous_product_name": str(
+                            attempt_slots.get("_previous_product_name", "")
+                        ).strip(),
                     },
                 )
-                state["quality_result"] = None
-            elif content:
+
+                quality_msg = AgentMessage(
+                    trace_id=state["trace_id"],
+                    payload={"script": script, "profile": profile},
+                    session_id=session.session_id,
+                )
+                quality_response = await self.quality_agent(quality_msg)
+                self._raise_if_agent_error(quality_response, "quality_check")
+                quality_result = quality_response.payload.get("quality_result", QualityResult())
+
+                if (
+                    best_script is None
+                    or quality_result.overall_score > (best_quality.overall_score if best_quality else 0.0)
+                ):
+                    best_script = script
+                    best_quality = quality_result
+
+                if quality_result.passed and len(content) >= min_chars:
+                    final_chunks = chunks
+                    final_script = script
+                    final_quality = quality_result
+                    quality_feedback = []
+                    break
+
+                quality_feedback = list(quality_result.suggestions[:4])
+                quality_feedback.append("请确保输出是完整文案，句尾完整收束，不要出现半句。")
+                state["retry_count"] = max(0, attempt - 1)
+                if attempt >= max_attempts:
+                    break
+
+            timing["script_generation"] = (time.perf_counter() - stream_start) * 1000
+            if final_script:
+                for token in final_chunks:
+                    yield token
+                state["script"] = final_script
+                state["quality_result"] = final_quality
+            elif best_script and len(best_script.content.strip()) >= min_chars:
+                for token in [best_script.content]:
+                    yield token
+                yield "\n\n[提示] 已返回降级版本，建议点击“重新生成”获取更高质量结果。"
+                state["script"] = best_script
+                state["quality_result"] = best_quality or QualityResult(
+                    passed=False,
+                    overall_score=0.0,
+                    suggestions=["建议重新生成以获取完整文案"],
+                )
+                state["error"] = state.get("error") or "stream quality check not passed"
+            elif best_script:
                 state["error"] = state.get("error") or (
-                    f"stream output too short: {len(content)} < {min_chars}"
+                    f"stream output too short: {len(best_script.content.strip())} < {min_chars}"
                 )
                 yield "\n\n[提示] 生成内容过短，建议重新生成或补充更多商品信息"
             elif not state.get("error"):
@@ -1335,6 +1414,20 @@ class Orchestrator:
         if isinstance(style_hint, list):
             return [str(x).strip() for x in style_hint if str(x).strip()]
         return []
+
+    def _merge_requirements_feedback(
+        self,
+        requirements: str,
+        feedback: List[str],
+    ) -> str:
+        base = (requirements or "").strip()
+        tips = [str(x).strip() for x in feedback if str(x).strip()]
+        if not tips:
+            return base
+        merged = "；".join(dict.fromkeys(tips))
+        if base:
+            return f"{base}；质量修正要求：{merged}"[:2000]
+        return f"质量修正要求：{merged}"[:2000]
 
     def info(self) -> Dict[str, Any]:
         return {

@@ -46,6 +46,18 @@ _PROMPT_META_PREFIXES = (
     "角色说明：", "角色说明:", "产品名称：", "产品名称:", "卖点：", "卖点:",
 )
 _SEPARATOR_LINE_RE = re.compile(r"^[-—_=*`]{2,}$")
+_PROMPT_META_BULLET_RE = re.compile(
+    r"^\s*-\s*(?:\*\*)?"
+    r"(达人|语气风格|常用口头禅|正式度|目标受众|商品名|品牌|价格带|核心特征|主卖点|合规提醒|核心卖点)"
+    r"(?:\*\*)?\s*[:：]"
+)
+_PROMPT_META_MD_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s*(商品名|内容描述|核心卖点|商品信息|达人风格|会话目标摘要|对话上下文|重复抑制|续写约束|活动信息|额外要求)(?:\s*[:：].*)?\s*$"
+)
+_PROMPT_META_INLINE_RE = re.compile(
+    r"^\s*(?:\*\*)?(本轮要求|上一版话术摘要|上版话术核心)(?:\*\*)?\s*[:：]"
+)
+_PLACEHOLDER_LINE_RE = re.compile(r"^\s*(---|\.{3}|…)\s*$")
 
 
 def clean_llm_response(text: str) -> str:
@@ -59,15 +71,26 @@ def clean_llm_response(text: str) -> str:
         text = text.split(GENERATION_DELIMITER, 1)[1]
     # 3. Remove any 【...】 bracket headers (prompt section echo)
     text = _BRACKET_HEADER_RE.sub("", text)
-    # 4. Strip leading metadata lines that are prompt echo
+    # 4. Remove metadata lines that are prompt echo
     lines = text.split("\n")
     cleaned = []
-    skipping = True
     for line in lines:
         s = line.strip()
-        if skipping and (not s or s.startswith(_PROMPT_META_PREFIXES)):
+        if (
+            not s
+            and not cleaned
+        ):
             continue
-        skipping = False
+        if s.startswith(_PROMPT_META_PREFIXES):
+            continue
+        if _PROMPT_META_BULLET_RE.match(s):
+            continue
+        if _PROMPT_META_MD_HEADING_RE.match(s):
+            continue
+        if _PROMPT_META_INLINE_RE.match(s):
+            continue
+        if _PLACEHOLDER_LINE_RE.match(s):
+            continue
         cleaned.append(line)
     # 4.1 Remove leading separator-only lines like "---"
     while cleaned:
@@ -75,7 +98,7 @@ def clean_llm_response(text: str) -> str:
         if not head:
             cleaned.pop(0)
             continue
-        if _SEPARATOR_LINE_RE.match(head):
+        if _SEPARATOR_LINE_RE.match(head) or _PLACEHOLDER_LINE_RE.match(head):
             cleaned.pop(0)
             continue
         break

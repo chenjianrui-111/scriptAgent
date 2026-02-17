@@ -162,6 +162,16 @@ class TestIntentAgent:
         )
         assert slots.get("product_name") == "卫龙辣条"
 
+    def test_slot_extraction_product_switch_called_phrase(self):
+        from script_agent.agents.intent_agent import SlotExtractor
+
+        extractor = SlotExtractor()
+        slots = extractor.extract(
+            "给我重新介绍另一个品叫卫龙辣条",
+            "script_generation",
+        )
+        assert slots.get("product_name") == "卫龙辣条"
+
     def test_reference_resolver(self):
         from script_agent.agents.intent_agent import ReferenceResolver
         from script_agent.models.context import SessionContext, EntityCache
@@ -268,6 +278,28 @@ class TestIntentAgent:
 
         asyncio.run(_test())
 
+    def test_intent_agent_injects_raw_query_and_requirements(self):
+        from script_agent.agents.intent_agent import IntentRecognitionAgent
+        from script_agent.models.context import SessionContext
+        from script_agent.models.message import AgentMessage
+
+        async def _test():
+            session = SessionContext()
+            session.slot_context.update(
+                "script_generation",
+                {"category": "食品", "scenario": "直播带货"},
+            )
+            query = "给我换一种活泼的风格介绍"
+            agent = IntentRecognitionAgent()
+            agent._fast_classify = lambda _q: ("script_modification", 0.92)
+            msg = AgentMessage(payload={"query": query, "session": session})
+            resp = await agent(msg)
+            result = resp.payload["intent_result"]
+            assert result.slots.get("_raw_query") == query
+            assert result.slots.get("requirements") == query
+
+        asyncio.run(_test())
+
 
 # =======================================================================
 # 4. 质量校验Agent测试
@@ -312,6 +344,41 @@ class TestQualityAgent:
             profile,
         )
         assert score >= 0.7  # 风格匹配度应该较高
+
+    def test_structure_checker_product_switch_and_prompt_echo(self):
+        from script_agent.agents.quality_agent import GenerationStructureChecker
+        from script_agent.models.message import GeneratedScript
+
+        checker = GenerationStructureChecker()
+        script = GeneratedScript(
+            generation_params={
+                "product_switch": True,
+                "product_name": "卫龙辣条",
+                "previous_product_name": "低卡魔芋爽",
+            }
+        )
+        passed, issues = checker.check(
+            "### 商品名：低卡魔芋爽\n- **核心卖点**：低卡零食，多种口味。\n本轮要求：语气保持一致。",
+            script,
+        )
+        categories = {i.get("category") for i in issues}
+        assert not passed
+        assert "prompt_echo" in categories
+        assert "missing_new_product_name" in categories
+        assert "contains_previous_product_name" in categories
+
+    def test_structure_checker_detects_tail_incomplete(self):
+        from script_agent.agents.quality_agent import GenerationStructureChecker
+        from script_agent.models.message import GeneratedScript
+
+        checker = GenerationStructureChecker()
+        passed, issues = checker.check(
+            "家人们这款连衣裙上身非常显瘦，而且它采用了260g的",
+            GeneratedScript(),
+        )
+        categories = {i.get("category") for i in issues}
+        assert not passed
+        assert "tail_incomplete" in categories
 
 
 # =======================================================================
@@ -657,6 +724,127 @@ class TestOrchestrator:
         body = asyncio.run(_run())
         assert "太短" not in body
         assert "生成内容过短" in body
+
+    def test_stream_quality_retry_for_incomplete_tail(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from script_agent.models.context import (
+            InfluencerProfile,
+            ProductProfile,
+            SessionContext,
+        )
+        from script_agent.models.message import IntentResult, QualityResult
+
+        class DummyIntentAgent:
+            async def __call__(self, message):
+                return message.create_response(
+                    payload={
+                        "intent_result": IntentResult(
+                            intent="stream_generation",
+                            confidence=0.95,
+                            slots={"category": "服饰", "scenario": "直播带货"},
+                        )
+                    },
+                    source="intent",
+                )
+
+        class DummyProfileAgent:
+            async def __call__(self, message):
+                return message.create_response(
+                    payload={
+                        "profile": InfluencerProfile(
+                            influencer_id="inf-fashion",
+                            name="穿搭达人",
+                            category="服饰",
+                        )
+                    },
+                    source="profile",
+                )
+
+        class DummyProductAgent:
+            async def fetch(self, slots, profile, session, query=""):
+                return ProductProfile(
+                    name="法式碎花连衣裙",
+                    category="服饰",
+                    selling_points=["显瘦版型", "轻盈透气"],
+                ), []
+
+        class DummyScriptAgent:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate_stream(
+                self,
+                intent_slots,
+                profile,
+                session,
+                product=None,
+                memory_hits=None,
+            ):
+                self.calls += 1
+                if self.calls == 1:
+                    yield "家人们这款连衣裙版型很美，而且它采用了260g的"
+                else:
+                    yield "家人们这款法式碎花连衣裙用了260g高密棉，版型显瘦还透气，日常通勤和约会都能穿，直播间下单还有福利。"
+
+        class DummyQualityAgent:
+            async def __call__(self, message):
+                content = message.payload.get("script").content
+                passed = content.endswith("。") and len(content) >= 40
+                suggestions = [] if passed else ["请补全句尾并输出完整口播正文。"]
+                return message.create_response(
+                    payload={
+                        "quality_result": QualityResult(
+                            passed=passed,
+                            overall_score=0.92 if passed else 0.45,
+                            suggestions=suggestions,
+                        )
+                    },
+                    source="quality_check",
+                )
+
+        class DummyMemoryRetriever:
+            async def remember_script(self, **kwargs):
+                return None
+
+        orch = Orchestrator()
+        orch.intent_agent = DummyIntentAgent()
+        orch.profile_agent = DummyProfileAgent()
+        orch.product_agent = DummyProductAgent()
+        orch.script_agent = DummyScriptAgent()
+        orch.quality_agent = DummyQualityAgent()
+        orch.memory_retriever = DummyMemoryRetriever()
+
+        session = SessionContext(session_id="s-stream-tail", tenant_id="t1", category="服饰")
+
+        async def _run():
+            chunks = []
+            async for token in orch.handle_stream(
+                query="给我一段连衣裙直播卖点话术",
+                session=session,
+                trace_id="trace-stream-tail",
+            ):
+                chunks.append(token)
+            return "".join(chunks)
+
+        body = asyncio.run(_run())
+        assert "采用了260g的" not in body
+        assert "直播间下单还有福利" in body
+
+    def test_script_agent_zhipu_increases_token_budget(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+        from script_agent.config.settings import settings
+
+        old_backend = settings.llm.primary_backend
+        old_max_tokens = settings.llm.max_tokens
+        try:
+            settings.llm.primary_backend = "zhipu"
+            settings.llm.max_tokens = 1024
+            agent = ScriptGenerationAgent()
+            assert agent._resolve_max_tokens("通用", stream_mode=False) >= 1200
+            assert agent._resolve_max_tokens("通用", stream_mode=True) >= 1400
+        finally:
+            settings.llm.primary_backend = old_backend
+            settings.llm.max_tokens = old_max_tokens
 
 
 class TestEnterpriseFeatures:

@@ -54,9 +54,45 @@ class SlotExtractor:
         re.compile(r"(?:这款|这个|该)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?=的|，|,|\s|$)"),
         re.compile(r"(?:换成|换为|改成|改为|切换到|讲讲|说说|介绍|推荐|安利)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?=吧|呢|的|，|,|。|\s|$)"),
     ]
+    EXPLICIT_PRODUCT_SWITCH_PATTERNS = [
+        re.compile(
+            r"(?:换成|换为|改成|改为|重新介绍|重新讲|重新说|介绍|推荐|安利|讲讲|说说)"
+            r"(?:一下|下)?(?:另一个|另外一个|新的|新款)?(?:商品|产品|品|款)?"
+            r"(?:叫|是|为)?\s*([\u4e00-\u9fffA-Za-z0-9\-]{2,24})"
+            r"(?=吧|呢|的|，|,|。|\s|$)"
+        ),
+        re.compile(
+            r"(?:另一个|另外一个|新的|新款)(?:商品|产品|品|款)"
+            r"(?:叫|是|为)\s*([\u4e00-\u9fffA-Za-z0-9\-]{2,24})"
+            r"(?=吧|呢|的|，|,|。|\s|$)"
+        ),
+    ]
     PRODUCT_PREFIX_CLEAN_RE = re.compile(r"^(?:新品|新的|新款|这款|这个|该|产品|商品|品|款)+")
     PRODUCT_LEADING_NOISE_RE = re.compile(r"^(?:换成|换为|改成|改为|介绍|推荐|安利|讲讲|说说)+")
     PRODUCT_TRAILING_NOISE_RE = re.compile(r"(?:的)?(?:卖点|话术|介绍|文案|直播)(?:内容)?$")
+    PRODUCT_STRIP_PREFIXES = [
+        "另一个品叫",
+        "另一个商品叫",
+        "另一个产品叫",
+        "另外一个品叫",
+        "另外一个商品叫",
+        "另外一个产品叫",
+        "另一个品",
+        "另外一个品",
+        "另一个商品",
+        "另外一个商品",
+        "新的品叫",
+        "新的商品叫",
+        "新的产品叫",
+        "新品叫",
+        "商品叫",
+        "产品叫",
+        "品叫",
+        "叫",
+        "名叫",
+        "是",
+        "为",
+    ]
     PRODUCT_STOPWORDS = {
         "直播", "话术", "开场", "卖点", "介绍", "产品", "商品", "文案",
         "风格", "内容", "一下", "一个", "继续", "再来",
@@ -117,13 +153,17 @@ class SlotExtractor:
             slots["style_hint"] = ",".join(style_hints)
 
         # 6. 商品槽位（商品名/卖点）
-        for pattern in self.PRODUCT_NAME_PATTERNS:
-            match = pattern.search(query)
-            if match:
-                candidate = self._normalize_product_name(match.group(1))
-                if candidate:
-                    slots["product_name"] = candidate
-                    break
+        explicit_product = self._extract_explicit_product_name(query)
+        if explicit_product:
+            slots["product_name"] = explicit_product
+        else:
+            for pattern in self.PRODUCT_NAME_PATTERNS:
+                match = pattern.search(query)
+                if match:
+                    candidate = self._normalize_product_name(match.group(1))
+                    if candidate:
+                        slots["product_name"] = candidate
+                        break
         if "卖点" in query:
             # e.g. 卖点：成分安全、持妆久
             for sep in ("卖点:", "卖点："):
@@ -140,13 +180,31 @@ class SlotExtractor:
 
         return slots
 
+    def _extract_explicit_product_name(self, query: str) -> str:
+        for pattern in self.EXPLICIT_PRODUCT_SWITCH_PATTERNS:
+            match = pattern.search(query or "")
+            if not match:
+                continue
+            candidate = self._normalize_product_name(match.group(1))
+            if candidate:
+                return candidate
+        return ""
+
     def _normalize_product_name(self, value: str) -> str:
         name = (value or "").strip()
         if not name:
             return ""
-        name = self.PRODUCT_PREFIX_CLEAN_RE.sub("", name).strip()
-        name = self.PRODUCT_LEADING_NOISE_RE.sub("", name).strip()
-        name = self.PRODUCT_TRAILING_NOISE_RE.sub("", name).strip()
+        for _ in range(4):
+            original = name
+            name = self.PRODUCT_PREFIX_CLEAN_RE.sub("", name).strip()
+            name = self.PRODUCT_LEADING_NOISE_RE.sub("", name).strip()
+            name = self.PRODUCT_TRAILING_NOISE_RE.sub("", name).strip()
+            for prefix in self.PRODUCT_STRIP_PREFIXES:
+                if name.startswith(prefix):
+                    name = name[len(prefix):].strip(" ：:，,。")
+                    break
+            if name == original:
+                break
         if not name:
             return ""
         if name in self.PRODUCT_STOPWORDS:
@@ -421,6 +479,22 @@ class IntentRecognitionAgent(BaseAgent):
         self.llm = LLMServiceClient()
         self.cfg = settings.intent
         self.classifier = IntentClassifier()
+        self._allowed_llm_slots = {
+            "category",
+            "target_name",
+            "scenario",
+            "sub_scenario",
+            "requirements",
+            "style_hint",
+            "product_name",
+            "product_id",
+            "selling_points",
+            "product_features",
+            "brand",
+            "price_range",
+            "target_audience",
+            "event",
+        }
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         query = message.payload.get("query", "")
@@ -430,11 +504,13 @@ class IntentRecognitionAgent(BaseAgent):
         intent, confidence = self._fast_classify(query)
 
         # Step 2: 分级判断
+        llm_slots: Dict[str, Any] = {}
         if confidence < self.cfg.medium_confidence_threshold:
             # 低置信 → LLM深度理解
             llm_result = await self._llm_intent_recognition(query, session)
             intent = llm_result.get("intent", intent)
             confidence = llm_result.get("confidence", confidence)
+            llm_slots = self._sanitize_llm_slots(llm_result.get("slots", {}))
 
         # Step 3: 槽位提取
         extracted_slots = self.slot_extractor.extract(query, intent)
@@ -443,7 +519,9 @@ class IntentRecognitionAgent(BaseAgent):
         resolved = self.reference_resolver.resolve(query, session)
         # 显式抽取优先于继承槽位，避免“换品”时被旧商品覆盖
         slots = dict(resolved)
+        slots.update(llm_slots)
         slots.update(extracted_slots)
+        self._inject_query_requirements(slots, query)
 
         # Step 5: 上下文补全
         slots = self._fill_from_context(slots, session)
@@ -481,6 +559,46 @@ class IntentRecognitionAgent(BaseAgent):
     def _fast_classify(self, query: str) -> tuple:
         """快速分类 (TF-IDF + LogisticRegression / 加权关键词降级)"""
         return self.classifier.classify(query)
+
+    def _sanitize_llm_slots(self, raw_slots: Any) -> Dict[str, Any]:
+        if not isinstance(raw_slots, dict):
+            return {}
+        cleaned: Dict[str, Any] = {}
+        for key, value in raw_slots.items():
+            if key not in self._allowed_llm_slots or value is None:
+                continue
+            if isinstance(value, str):
+                v = value.strip()
+                if not v or v.lower() == "null":
+                    continue
+                cleaned[key] = v
+                continue
+            if isinstance(value, list):
+                arr = [str(i).strip() for i in value if str(i).strip()]
+                if arr:
+                    cleaned[key] = arr
+                continue
+            cleaned[key] = value
+
+        if isinstance(cleaned.get("style_hint"), list):
+            cleaned["style_hint"] = ",".join(cleaned["style_hint"])
+        if "product_name" in cleaned:
+            normalized = self.slot_extractor._normalize_product_name(
+                str(cleaned["product_name"])
+            )
+            if normalized:
+                cleaned["product_name"] = normalized
+            else:
+                cleaned.pop("product_name", None)
+        return cleaned
+
+    def _inject_query_requirements(self, slots: Dict[str, Any], query: str) -> None:
+        raw_query = (query or "").strip()
+        if not raw_query:
+            return
+        safe_query = raw_query[:2000]
+        slots["_raw_query"] = safe_query
+        slots["requirements"] = safe_query
 
     def _fill_from_context(self, slots: Dict, session: SessionContext) -> Dict:
         """从历史对话补全缺失槽位"""

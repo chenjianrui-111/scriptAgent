@@ -7,6 +7,7 @@ from script_agent.services.llm_client import (
     LLMBackend,
     LLMCallError,
     LLMServiceClient,
+    clean_llm_response,
 )
 
 
@@ -180,3 +181,17 @@ async def test_circuit_breaker_open_skips_primary_and_use_fallback():
     assert second == "fb-2"
     assert primary.sync_calls == 1
     assert fallback.sync_calls == 2
+
+
+def test_clean_llm_response_strips_prompt_echo_markdown_blocks():
+    raw = (
+        "### 商品名：低卡魔芋爽\n"
+        "- **核心卖点**：低卡零食、多种口味\n"
+        "本轮要求：语气保持一致\n"
+        "---话术正文---\n"
+        "家人们，今天上新的是卫龙辣条，香辣带劲，越嚼越香！"
+    )
+    cleaned = clean_llm_response(raw)
+    assert "商品名" not in cleaned
+    assert "本轮要求" not in cleaned
+    assert "卫龙辣条" in cleaned

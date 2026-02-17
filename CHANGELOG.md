@@ -5,6 +5,41 @@
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-02-17
+
+### Added
+
+- 新增“真实链路”API 级 E2E 测试（`tests/test_api_real_llm_e2e.py`）：
+  - `/sessions -> /generate(旧商品) -> /generate(换品)`
+  - 断言换品后文案必须包含新商品名，且不包含旧商品名
+- 新增流式质量重试回归测试（`tests/test_agents.py`）：
+  - 首轮输出句尾不完整时，触发质量反馈并自动重试
+  - 第二轮返回完整文案
+- 新增句尾完整性/回显清洗测试：
+  - `test_structure_checker_detects_tail_incomplete`
+  - `test_clean_llm_response_strips_prompt_echo_markdown_blocks`
+
+### Changed
+
+- 生成校验增强（`script_agent/agents/script_agent.py`）：
+  - 增加“有效正文长度”判定（过滤提示词回显后再计数）
+  - 增加“句尾完整性”判定（拦截“它采用了260g的”这类半句截断）
+  - 回显命中/正文不足/句尾不完整场景统一进入强制重试
+- 流式编排链路增强（`script_agent/agents/orchestrator.py`）：
+  - 流式路径补齐质量校验闭环
+  - 质量不通过时将反馈注入 `requirements` 并自动重试
+  - 支持返回最佳降级结果并附带提示，避免直接中断
+- 智谱模型输出预算动态提升（`script_agent/agents/script_agent.py`）：
+  - 在 `zhipu` 后端下提高基础 `max_tokens`
+  - 在回显/过短/句尾不完整重试场景进一步放大 token 预算
+- 回显清洗规则扩展（`script_agent/services/llm_client.py`）：
+  - 支持识别加粗字段、Markdown 标题、`本轮要求` 等行内回显形式
+
+### Fixed
+
+- 修复多轮生成中“正文未完成即结束”导致前端展示半句截断的问题。
+- 修复流式路径此前仅按最小长度放行、未做质量校验导致不完整文案漏出的缺陷。
+
 ## [1.5.1] - 2026-02-18
 
 ### Added

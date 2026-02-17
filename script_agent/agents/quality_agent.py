@@ -250,6 +250,128 @@ class StyleConsistencyChecker:
         return min(max(score, 0.0), 1.0), suggestions
 
 
+class GenerationStructureChecker:
+    """生成结构与意图一致性校验。"""
+
+    _prompt_echo_tokens = (
+        "商品名",
+        "内容描述",
+        "核心卖点",
+        "商品信息",
+        "会话目标摘要",
+        "对话上下文",
+        "本轮要求",
+    )
+    _heading_re = re.compile(
+        r"^\s*#{1,6}\s*(?:\*\*)?(商品名|内容描述|核心卖点|商品信息|达人风格|会话目标摘要|对话上下文)(?:\*\*)?(?:\s*[:：].*)?\s*$"
+    )
+    _bullet_meta_re = re.compile(
+        r"^\s*-\s*(?:\*\*)?(商品名|核心卖点|主卖点|语气风格|达人|品牌|价格带)(?:\*\*)?\s*[:：]"
+    )
+    _tail_incomplete_suffixes = (
+        "的", "了", "和", "与", "及", "并", "在", "让", "把", "将",
+        "就", "也", "都", "更", "而", "并且", "以及", "等",
+    )
+
+    def check(self, text: str, script: GeneratedScript) -> Tuple[bool, List[Dict]]:
+        issues: List[Dict] = []
+
+        if self._looks_like_prompt_echo(text):
+            issues.append({
+                "type": "structure",
+                "category": "prompt_echo",
+                "suggestion": "输出包含提示词回显，请仅保留可直接口播的正文内容",
+            })
+
+        if self._looks_too_simple(text):
+            issues.append({
+                "type": "structure",
+                "category": "content_too_simple",
+                "suggestion": "内容信息密度不足，建议补充至少2个具体卖点并增加互动引导",
+            })
+        if self._tail_incomplete(text):
+            issues.append({
+                "type": "structure",
+                "category": "tail_incomplete",
+                "suggestion": "文案末句不完整，请补全最后一句并完整收尾",
+            })
+
+        switch_issues = self._check_product_switch_constraints(text, script)
+        if switch_issues:
+            issues.extend(switch_issues)
+
+        return len(issues) == 0, issues
+
+    def _looks_like_prompt_echo(self, text: str) -> bool:
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if not lines:
+            return False
+        heading_hits = sum(1 for ln in lines[:6] if self._heading_re.match(ln))
+        bullet_hits = sum(1 for ln in lines[:8] if self._bullet_meta_re.match(ln))
+        token_hits = sum((text or "").count(tok) for tok in self._prompt_echo_tokens)
+        return (heading_hits >= 1 and token_hits >= 1) or (bullet_hits >= 2 and token_hits >= 2)
+
+    def _looks_too_simple(self, text: str) -> bool:
+        clean = (text or "").strip()
+        if len(clean) < max(24, settings.llm.script_min_chars):
+            return True
+        sentences = [
+            s.strip()
+            for s in re.split(r"[。！？!?；;\n]", clean)
+            if len(s.strip()) >= 6
+        ]
+        if len(clean) >= 80 and len(sentences) < 2:
+            return True
+        if len(sentences) < 2:
+            return False
+        unique = {self._normalize(s) for s in sentences if self._normalize(s)}
+        return len(unique) < 2
+
+    def _check_product_switch_constraints(
+        self,
+        text: str,
+        script: GeneratedScript,
+    ) -> List[Dict]:
+        params = script.generation_params if isinstance(script.generation_params, dict) else {}
+        if not params.get("product_switch"):
+            return []
+        issues: List[Dict] = []
+        normalized_text = self._normalize(text or "")
+        new_name = self._normalize(str(params.get("product_name", "")).strip())
+        old_name = self._normalize(str(params.get("previous_product_name", "")).strip())
+        if new_name and new_name not in normalized_text:
+            issues.append({
+                "type": "structure",
+                "category": "missing_new_product_name",
+                "suggestion": "换品后文案必须明确包含新商品名",
+            })
+        if old_name and old_name in normalized_text and old_name != new_name:
+            issues.append({
+                "type": "structure",
+                "category": "contains_previous_product_name",
+                "suggestion": "换品后文案不应再包含旧商品名",
+            })
+        return issues
+
+    def _normalize(self, text: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text or "").lower()
+
+    def _tail_incomplete(self, text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return True
+        if stripped.endswith(("。", "！", "？", "!", "?", "；", ";", "”", "\"", "）", ")")):
+            return False
+        parts = re.split(r"[。！？!?；;\n]", stripped)
+        tail = parts[-1].strip() if parts else stripped
+        normalized_tail = self._normalize(tail)
+        if not normalized_tail:
+            return True
+        if len(normalized_tail) < 8:
+            return True
+        return any(normalized_tail.endswith(sfx) for sfx in self._tail_incomplete_suffixes)
+
+
 class QualityCheckAgent(BaseAgent):
     """
     质量校验Agent
@@ -261,6 +383,7 @@ class QualityCheckAgent(BaseAgent):
         self.sensitive_checker = SensitiveWordChecker()
         self.compliance_checker = ComplianceChecker()
         self.style_checker = StyleConsistencyChecker()
+        self.structure_checker = GenerationStructureChecker()
         self.llm = LLMServiceClient()
         self.cfg = settings.quality
 
@@ -275,11 +398,13 @@ class QualityCheckAgent(BaseAgent):
         sensitive_task = asyncio.to_thread(self.sensitive_checker.check, text)
         compliance_task = asyncio.to_thread(self.compliance_checker.check, text)
         style_task = asyncio.to_thread(self.style_checker.check, text, profile)
+        structure_task = asyncio.to_thread(self.structure_checker.check, text, script)
 
         (sensitive_passed, sensitive_issues), \
         (compliance_passed, compliance_issues), \
-        (style_score, style_suggestions) = await asyncio.gather(
-            sensitive_task, compliance_task, style_task
+        (style_score, style_suggestions), \
+        (structure_passed, structure_issues) = await asyncio.gather(
+            sensitive_task, compliance_task, style_task, structure_task
         )
 
         # 可选: LLM综合评估 (高质量场景)
@@ -288,14 +413,17 @@ class QualityCheckAgent(BaseAgent):
             llm_score = await self._llm_evaluate(text, profile)
 
         # 综合评分
-        all_issues = sensitive_issues + compliance_issues
+        all_issues = sensitive_issues + compliance_issues + structure_issues
         overall_score = self._calculate_overall_score(
             sensitive_passed, compliance_passed, style_score, llm_score
         )
+        if not structure_passed:
+            overall_score = max(0.0, round(overall_score - min(0.2, 0.08 * len(structure_issues)), 3))
         passed = (
             sensitive_passed
             and compliance_passed
             and style_score >= self.cfg.style_consistency_threshold
+            and structure_passed
         )
 
         quality_result = QualityResult(

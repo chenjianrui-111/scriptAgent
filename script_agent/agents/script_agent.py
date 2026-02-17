@@ -183,6 +183,16 @@ class PromptBuilder:
         lines.append(f"- 当前任务: {scenario}")
         if product and product.name:
             lines.append(f"- 当前商品: {product.name}")
+        if intent_slots.get("_product_switch"):
+            current_name = (
+                str(intent_slots.get("product_name", "")).strip()
+                or (product.name if product else "")
+            )
+            previous_name = str(intent_slots.get("_previous_product_name", "")).strip()
+            if current_name:
+                lines.append(f"- 商品切换: 本轮只围绕“{current_name}”展开")
+            if previous_name:
+                lines.append(f"- 旧商品禁用: 禁止再提及“{previous_name}”")
 
         recent_users = [t.user_message.strip() for t in session.turns[-3:] if t.user_message.strip()]
         if recent_users:
@@ -278,6 +288,13 @@ class PromptBuilder:
             lines.append(f"- 不要复用上版开头（例如“{prev_head}”）")
         lines.append("- 新增至少2个信息点（卖点/场景/互动/转化引导）")
         lines.append("- 不输出字段清单、提示语、占位符（如 --- / ...）")
+        if slots.get("_product_switch"):
+            new_product = str(slots.get("product_name", "")).strip()
+            old_product = str(slots.get("_previous_product_name", "")).strip()
+            if new_product:
+                lines.append(f"- 必须明确提及新商品“{new_product}”")
+            if old_product:
+                lines.append(f"- 绝对不要出现旧商品“{old_product}”")
         return "\n".join(lines)
 
     def _build_compressed_history(self, context: CompressedContext) -> str:
@@ -317,17 +334,35 @@ class ScriptGenerationAgent(BaseAgent):
         self.primary_attempts = max(1, settings.llm.script_primary_attempts)
         self._separator_only_re = re.compile(r"^[-—_=*`.\s]{2,}$")
         self._meta_line_re = re.compile(
-            r"^\s*-\s*(达人|语气风格|常用口头禅|正式度|目标受众|商品名|品牌|价格带|核心特征|主卖点|合规提醒)\s*[:：]"
+            r"^\s*-\s*(?:\*\*)?"
+            r"(达人|语气风格|常用口头禅|正式度|目标受众|商品名|品牌|价格带|核心特征|主卖点|合规提醒|核心卖点)"
+            r"(?:\*\*)?\s*[:：]"
+        )
+        self._meta_heading_re = re.compile(
+            r"^\s*#{1,6}\s*(商品名|内容描述|核心卖点|商品信息|达人风格|会话目标摘要|对话上下文|重复抑制|续写约束|活动信息|额外要求)(?:\s*[:：].*)?\s*$"
+        )
+        self._meta_sentence_re = re.compile(
+            r"^\s*(?:\*\*)?(本轮要求|上一版话术摘要|上版话术核心)(?:\*\*)?\s*[:：]"
+        )
+        self._tail_incomplete_suffixes = (
+            "的", "了", "和", "与", "及", "并", "在", "让", "把", "将",
+            "就", "也", "都", "更", "而", "并且", "以及", "等",
         )
 
     async def process(self, message: AgentMessage) -> AgentMessage:
-        intent_slots = message.payload.get("slots", {})
+        intent_slots = dict(message.payload.get("slots", {}))
         profile: InfluencerProfile = message.payload.get(
             "profile", InfluencerProfile()
         )
         product: ProductProfile = message.payload.get("product", ProductProfile())
         memory_hits: List[Dict[str, Any]] = message.payload.get("memory_hits", [])
         session: SessionContext = message.payload.get("session", SessionContext())
+        feedback = message.payload.get("feedback", [])
+        if feedback:
+            intent_slots["requirements"] = self._merge_feedback_requirements(
+                str(intent_slots.get("requirements", "")),
+                [str(x).strip() for x in feedback if str(x).strip()],
+            )
         category = intent_slots.get("category", profile.category or "通用")
 
         compressed_context = await self._compress_session_memory(session)
@@ -377,6 +412,11 @@ class ScriptGenerationAgent(BaseAgent):
                 "compressed_context_tokens": (
                     compressed_context.token_count if compressed_context else 0
                 ),
+                "product_name": str(intent_slots.get("product_name", "")).strip(),
+                "product_switch": bool(intent_slots.get("_product_switch")),
+                "previous_product_name": str(
+                    intent_slots.get("_previous_product_name", "")
+                ).strip(),
             },
         )
 
@@ -434,12 +474,14 @@ class ScriptGenerationAgent(BaseAgent):
         *,
         prefer_fallback: bool = False,
         stream_mode: bool = False,
+        max_tokens: Optional[int] = None,
     ) -> str:
+        max_tokens = max_tokens or settings.llm.max_tokens
         if not stream_mode:
             raw = await self.llm.generate_sync(
                 prompt,
                 category=category,
-                max_tokens=800,
+                max_tokens=max_tokens,
                 request_id=request_id,
                 prefer_fallback=prefer_fallback,
             )
@@ -451,6 +493,7 @@ class ScriptGenerationAgent(BaseAgent):
             category=category,
             request_id=request_id,
             prefer_fallback=prefer_fallback,
+            max_tokens=max_tokens,
         ):
             buffer.append(token)
         return clean_llm_response("".join(buffer))
@@ -469,6 +512,7 @@ class ScriptGenerationAgent(BaseAgent):
         last_reason = ""
         last_text = ""
         best_soft_candidate = ""
+        base_max_tokens = self._resolve_max_tokens(category, stream_mode=stream_mode)
         for idx in range(1, self.primary_attempts + 1):
             try:
                 attempt_prompt = self._build_retry_prompt(
@@ -477,6 +521,12 @@ class ScriptGenerationAgent(BaseAgent):
                     reason=last_reason,
                     previous_text=last_text,
                 )
+                attempt_max_tokens = self._resolve_attempt_max_tokens(
+                    base=base_max_tokens,
+                    attempt=idx,
+                    reason=last_reason,
+                    stream_mode=stream_mode,
+                )
                 text = (
                     await self._generate_once(
                         attempt_prompt,
@@ -484,6 +534,7 @@ class ScriptGenerationAgent(BaseAgent):
                         f"{request_id}:primary:{idx}",
                         prefer_fallback=False,
                         stream_mode=stream_mode,
+                        max_tokens=attempt_max_tokens,
                     )
                 ).strip()
                 text = self._post_process_output(text)
@@ -528,6 +579,12 @@ class ScriptGenerationAgent(BaseAgent):
                     f"{request_id}:fallback",
                     prefer_fallback=True,
                     stream_mode=stream_mode,
+                    max_tokens=self._resolve_attempt_max_tokens(
+                        base=base_max_tokens,
+                        attempt=self.primary_attempts + 1,
+                        reason=last_reason or "primary_failed",
+                        stream_mode=stream_mode,
+                    ),
                 )
             ).strip()
             fallback_text = self._post_process_output(fallback_text)
@@ -590,6 +647,14 @@ class ScriptGenerationAgent(BaseAgent):
             lines.append("- 禁止输出字段清单或配置项（如“商品名/主卖点/合规提醒”）")
         elif reason == "high_overlap_with_recent_script":
             lines.append("- 与上一版重复过高，请改写为全新表述，不要复用开头")
+        elif reason == "missing_new_product_name":
+            lines.append("- 你没有提及本轮新商品名，请明确写出新商品并围绕其卖点展开")
+        elif reason == "contains_previous_product_name":
+            lines.append("- 输出中出现了旧商品名，请删除旧商品并仅保留新商品信息")
+        elif reason == "effective_content_too_short":
+            lines.append("- 正文信息不足，请扩展为完整口播段，至少包含卖点、场景和互动引导")
+        elif reason == "tail_incomplete":
+            lines.append("- 你的结尾不完整，请补全最后一句并以完整句号或感叹号收尾")
         elif reason == "content_too_short":
             lines.append("- 内容长度不足，请补足完整口播段落并加入互动与转化信息")
         elif reason == "repetition_detected":
@@ -609,7 +674,13 @@ class ScriptGenerationAgent(BaseAgent):
             s = line.strip()
             if self._separator_only_re.match(s):
                 continue
+            if s in {"---", "...", "…"}:
+                continue
             if self._meta_line_re.match(s):
+                continue
+            if self._meta_heading_re.match(s):
+                continue
+            if self._meta_sentence_re.match(s):
                 continue
             lines.append(line)
         cleaned = "\n".join(lines).strip()
@@ -641,8 +712,15 @@ class ScriptGenerationAgent(BaseAgent):
             return "content_too_short"
         if self._is_prompt_echo(text):
             return "prompt_echo_detected"
+        if self._effective_content_length(text) < self.min_chars:
+            return "effective_content_too_short"
+        if self._is_tail_incomplete(text):
+            return "tail_incomplete"
         if self._has_heavy_repetition(text):
             return "repetition_detected"
+        product_switch_issue = self._check_product_switch_consistency(text, slots)
+        if product_switch_issue:
+            return product_switch_issue
         if self._is_high_overlap_with_recent(text, session, slots):
             return "high_overlap_with_recent_script"
         return None
@@ -654,7 +732,69 @@ class ScriptGenerationAgent(BaseAgent):
             marker_hits += text.count(m)
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         bullet_like = sum(1 for ln in lines[:4] if ln.startswith("-"))
-        return marker_hits >= 3 and bullet_like >= 2
+        markdown_heading = sum(1 for ln in lines[:4] if ln.startswith("#"))
+        meta_like = sum(
+            1 for ln in lines[:6]
+            if self._meta_line_re.match(ln)
+            or self._meta_heading_re.match(ln)
+            or self._meta_sentence_re.match(ln)
+        )
+        return (
+            (marker_hits >= 3 and bullet_like >= 2)
+            or (meta_like >= 2 and marker_hits >= 1)
+            or (markdown_heading >= 1 and marker_hits >= 1)
+        )
+
+    def _effective_content_length(self, text: str) -> int:
+        if not text:
+            return 0
+        cleaned = re.sub(
+            r"(?:\*\*)?(本轮要求|上一版话术摘要|上版话术核心)(?:\*\*)?\s*[:：][^\n。！？!?]*",
+            "",
+            text,
+        )
+        cleaned = re.sub(
+            r"(?:---话术正文---|###\s*(商品名|内容描述|核心卖点)[^。\n]*|-\s*\*\*(核心卖点|主卖点)\*\*[:：][^\n]*)",
+            "",
+            cleaned,
+        )
+        normalized = self._normalize_text(cleaned)
+        return len(normalized)
+
+    def _is_tail_incomplete(self, text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return True
+        if stripped.endswith(("。", "！", "？", "!", "?", "；", ";", "”", "\"", "）", ")")):
+            return False
+        parts = re.split(r"[。！？!?；;\n]", stripped)
+        tail = parts[-1].strip() if parts else stripped
+        normalized_tail = self._normalize_text(tail)
+        if not normalized_tail:
+            return True
+        if len(normalized_tail) < 8:
+            return True
+        return any(normalized_tail.endswith(sfx) for sfx in self._tail_incomplete_suffixes)
+
+    def _check_product_switch_consistency(
+        self,
+        text: str,
+        slots: Dict[str, Any],
+    ) -> Optional[str]:
+        if not slots.get("_product_switch"):
+            return None
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return "content_too_short"
+        new_product = self._normalize_text(str(slots.get("product_name", "")).strip())
+        old_product = self._normalize_text(
+            str(slots.get("_previous_product_name", "")).strip()
+        )
+        if new_product and new_product not in normalized_text:
+            return "missing_new_product_name"
+        if old_product and old_product in normalized_text and old_product != new_product:
+            return "contains_previous_product_name"
+        return None
 
     def _has_heavy_repetition(self, text: str) -> bool:
         parts = [p for p in re.findall(r"[^。！？!?；;\n]+", text) if p.strip()]
@@ -723,6 +863,53 @@ class ScriptGenerationAgent(BaseAgent):
 
     def _is_soft_issue(self, issue: str) -> bool:
         return issue in {"high_overlap_with_recent_script", "repetition_detected"}
+
+    def _merge_feedback_requirements(
+        self,
+        current_requirements: str,
+        feedback: List[str],
+    ) -> str:
+        current = (current_requirements or "").strip()
+        if not feedback:
+            return current
+        tips = "；".join(dict.fromkeys(feedback))
+        if current:
+            return f"{current}；质量修正要求：{tips}"[:2000]
+        return f"质量修正要求：{tips}"[:2000]
+
+    def _resolve_max_tokens(self, category: str, *, stream_mode: bool) -> int:
+        backend_name = type(self.llm.backend).__name__.lower()
+        is_zhipu = "zhipu" in backend_name or settings.llm.primary_backend.lower() == "zhipu"
+        if stream_mode:
+            base = max(settings.llm.max_tokens, 1024)
+            if is_zhipu:
+                base = max(base, 1400)
+            return min(2200, base)
+        base = max(800, min(settings.llm.max_tokens, 1400))
+        if is_zhipu:
+            base = max(base, 1200)
+        return min(2000, base)
+
+    def _resolve_attempt_max_tokens(
+        self,
+        *,
+        base: int,
+        attempt: int,
+        reason: str,
+        stream_mode: bool,
+    ) -> int:
+        max_limit = 2200 if stream_mode else 2000
+        boost_reasons = {
+            "prompt_echo_detected",
+            "effective_content_too_short",
+            "content_too_short",
+            "tail_incomplete",
+        }
+        if reason in boost_reasons:
+            base = int(base * 1.25)
+        if attempt >= 2:
+            base = int(base * 1.1)
+        return min(max_limit, max(256, base))
 
     def _reduce_leading_overlap(
         self,
