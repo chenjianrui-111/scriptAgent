@@ -46,7 +46,80 @@ Infra Services
 
 ---
 
-## 三、核心能力设计（按模块）
+## 三、核心能力设计（平台能力）
+
+### 1) LangGraph 编排与回退执行
+- 编排器以 LangGraph 作为主执行引擎，状态由 `WorkflowState` 统一定义。
+- 若环境未安装 LangGraph，自动降级到顺序执行路径，保持接口兼容。
+- 对外接口保持不变：`handle_request`、`handle_stream`。
+
+### 2) 对话快速恢复机制（Checkpoint 独立存储）
+- Checkpoint 从 `SessionContext.workflow_snapshot` 拆分为独立存储层，支持 `Memory/Redis/SQLite`。
+- 每次写入带版本号（`version` 自增）和审计字段：
+  - `trace_id`
+  - `status`
+  - `checksum`
+  - `created_at`
+- 支持：
+  - 最新快照读取（快速恢复）
+  - 历史版本回放（故障排查）
+  - 历史列表查询（审计）
+- 同请求去重缓存（`REQUEST_DEDUP_ENABLED`）可在完成态快速返回，避免重复调用模型。
+
+### 3) 并发控制（多实例一致）
+- 会话锁支持双后端：
+  - `SessionLockManager`（进程内）
+  - `RedisSessionLockManager`（分布式锁，`SET NX PX + Lua` 原子释放）
+- 分布式锁异常时自动降级到本地锁，保证服务可用性。
+- `/generate` 和 `/generate/stream` 均纳入会话锁，避免同会话并发写冲突。
+
+### 4) 核心接口限流与保护
+- `CoreRateLimiter` 支持 `Local/Redis` 两种后端。
+- 对租户维度同时实施：
+  - `QPS` 限流
+  - `Token/min` 限流
+- 超限返回 `429`，并附带 `reason` 与 `retry_after_seconds`。
+
+### 5) 生成失败降级（LLM Fallback）
+- 主模型调用失败时，`LLMServiceClient` 可自动切换到备用模型。
+- 支持同步与流式场景（流式在首段失败时切换）。
+- 可配置备用后端类型（`vLLM/Ollama/zhipu`）和备用模型。
+
+### 6) 商品理解与长期记忆召回
+- `ProductAgent` 从商品名/卖点/特征构建商品画像，补齐“达人风格 + 商品卖点”联合生成场景。
+- 长期记忆检索服务支持 `embedding` 向量化 + 向量检索（`memory/elasticsearch` 后端）。
+- 生成成功后自动写回长期记忆，后续请求可按租户、达人、品类、商品名做相似召回。
+
+### 7) 会话记忆规则裁剪与压缩落地
+- `SessionManager.save()` 增加 retention policy：
+  - 旧轮次规则压缩（保留意图槽位摘要与核心语义）
+  - 最大轮次裁剪（防止会话无限膨胀）
+  - 生成脚本列表裁剪
+- `ScriptGenerationAgent` 已接入 `SessionContextCompressor`，多轮场景会优先使用压缩会话记忆构建 Prompt。
+
+## 四、核心模块与功能映射
+
+| 模块 | 文件 | 功能点 |
+| --- | --- | --- |
+| API 网关层 | `script_agent/api/app.py` | 会话创建、同步/流式生成、checkpoint 查询、健康检查、指标出口 |
+| 鉴权层 | `script_agent/api/auth.py` | API Key/JWT 鉴权、租户隔离、基础限流 |
+| 编排层 | `script_agent/agents/orchestrator.py` | LangGraph 图编排、状态推进、恢复续跑、去重缓存、checkpoint 写入 |
+| 意图识别 | `script_agent/agents/intent_agent.py` | 意图分类、槽位提取、指代/续写消解、澄清判断 |
+| 画像层 | `script_agent/agents/profile_agent.py` | 达人画像聚合、缓存利用、风格上下文补全 |
+| 商品层 | `script_agent/agents/product_agent.py` | 商品画像构建、卖点补全、长期记忆召回 |
+| 生成层 | `script_agent/agents/script_agent.py` | Prompt 构建、垂类话术生成、参数控制 |
+| 质检层 | `script_agent/agents/quality_agent.py` | 敏感词、合规、风格一致性校验与重试建议 |
+| Skill 扩展层 | `script_agent/skills/` | 意图到技能路由，支持生成/修改/批量等可插拔能力 |
+| LLM 服务层 | `script_agent/services/llm_client.py` | 统一 vLLM/Ollama 接口、连接池复用、主备降级 |
+| 会话管理层 | `script_agent/services/session_manager.py` | 会话增删改查、序列化、Memory/Redis/SQLite 多后端 |
+| 并发控制层 | `script_agent/services/concurrency.py` | 本地锁/Redis 分布式会话锁、超时控制、统计 |
+| Checkpoint 层 | `script_agent/services/checkpoint_store.py` | 版本化 checkpoint、回放、审计、存储后端抽象 |
+| 限流层 | `script_agent/services/core_rate_limiter.py` | 租户维度 QPS + Token 双限流，支持 Redis 共享配额 |
+| 长期记忆层 | `script_agent/services/long_term_memory.py` | 向量化写回与检索召回（Memory/Elasticsearch） |
+| 可观测层 | `script_agent/observability/metrics.py` | 请求、延迟、锁超时、checkpoint 写入、缓存命中等指标 |
+| 配置层 | `script_agent/config/settings.py` | 环境变量集中配置，覆盖编排/锁/限流/checkpoint/LLM 主备 |
+
+## 五、核心能力设计（按模块亮点）
 
 ### 1) API 层（`script_agent/api/app.py`）
 **出色点**
@@ -152,7 +225,7 @@ Infra Services
 
 ---
 
-## 四、功能清单
+## 六、功能清单
 
 - 话术生成：开场话术、卖点介绍、促销话术、种草文案。
 - 多轮对话：续写、改风格、换商品、重生成。
@@ -163,7 +236,7 @@ Infra Services
 
 ---
 
-## 五、快速开始（本地）
+## 七、快速开始（本地）
 
 ### 1) 环境要求
 
@@ -198,7 +271,7 @@ uvicorn script_agent.api.app:app --host 127.0.0.1 --port 8080
 
 ---
 
-## 六、关键环境变量
+## 八、关键环境变量
 
 以 `.env.example` 为准，下面是最常用项。
 
@@ -223,7 +296,7 @@ uvicorn script_agent.api.app:app --host 127.0.0.1 --port 8080
 
 ---
 
-## 七、API 概览
+## 九、API 概览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -272,7 +345,7 @@ curl -N -X POST http://127.0.0.1:8080/api/v1/generate/stream \
 
 ---
 
-## 八、部署
+## 十、部署
 
 ### 1) Docker Compose（推荐）
 
@@ -291,7 +364,7 @@ curl -sS http://127.0.0.1:8080/api/v1/health
 
 ---
 
-## 九、测试
+## 十一、测试
 
 ```bash
 # 全量
@@ -309,7 +382,7 @@ pytest -q tests/test_llm_client_reliability.py
 
 ---
 
-## 十、目录结构（核心）
+## 十二、目录结构（核心）
 
 ```text
 script_agent/
@@ -326,7 +399,7 @@ tests/            # 单元/集成/E2E 测试
 
 ---
 
-## 十一、补充说明
+## 十三、补充说明
 
 - 项目默认可从 mock/规则能力启动，随后平滑接入真实达人与商品数据。
 - 如果你要做线上版本，建议优先完成三件事：
