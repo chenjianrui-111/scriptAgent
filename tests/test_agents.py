@@ -1274,6 +1274,128 @@ class TestEnterpriseFeatures:
 
 
 # =======================================================================
+# Clean LLM Response
+# =======================================================================
+
+
+class TestCleanLLMResponse:
+
+    def test_strip_think_blocks(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = "<think>我需要先分析用户的需求...</think>家人们大家好！今天给大家推荐一款超好用的面霜！"
+        result = clean_llm_response(text)
+        assert "<think>" not in result
+        assert "我需要先分析" not in result
+        assert "家人们大家好" in result
+
+    def test_strip_prompt_headers(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = "【达人风格】\n- 达人: 小雅\n- 语气风格: 活泼\n家人们大家好！"
+        result = clean_llm_response(text)
+        assert "【达人风格】" not in result
+        assert "- 达人:" not in result
+        assert "- 语气风格:" not in result
+        assert "家人们大家好" in result
+
+    def test_strip_product_headers(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = "【商品信息】\n- 商品名: 面霜\n- 品牌: XX\n姐妹们这款面霜真的绝了！"
+        result = clean_llm_response(text)
+        assert "【商品信息】" not in result
+        assert "- 商品名:" not in result
+        assert "姐妹们这款面霜" in result
+
+    def test_clean_content_passes_through(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = "家人们大家好！今天给大家推荐一款超好用的面霜！\n效果真的太棒了！"
+        result = clean_llm_response(text)
+        assert result == text
+
+    def test_empty_string(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        assert clean_llm_response("") == ""
+        assert clean_llm_response(None) is None
+
+    def test_mixed_contamination(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = (
+            "<think>让我分析一下</think>"
+            "【达人风格】\n- 达人: 小雅\n- 语气风格: 活泼\n"
+            "【商品信息】\n- 商品名: 口红\n"
+            "姐妹们！今天的口红真的太好看了！"
+        )
+        result = clean_llm_response(text)
+        assert "<think>" not in result
+        assert "【达人风格】" not in result
+        assert "【商品信息】" not in result
+        assert "- 达人:" not in result
+        assert "姐妹们！今天的口红" in result
+
+    def test_multiline_think_block(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = (
+            "<think>\n这是一个服饰品类的种草文案需求。\n"
+            "我需要用轻松的语气来写。\n</think>\n"
+            "最近入手了一条法式碎花连衣裙，必须分享给你们！"
+        )
+        result = clean_llm_response(text)
+        assert "<think>" not in result
+        assert "法式碎花连衣裙" in result
+
+    def test_delimiter_extraction(self):
+        from script_agent.services.llm_client import clean_llm_response, GENERATION_DELIMITER
+
+        text = (
+            "【达人风格】\n- 达人: 小雅\n- 语气风格: 活泼\n"
+            "【商品信息】\n- 商品名: 面霜\n"
+            f"\n{GENERATION_DELIMITER}\n"
+            "姐妹们大家好！今天给大家推荐一款超级好用的面霜！"
+        )
+        result = clean_llm_response(text)
+        assert "【达人风格】" not in result
+        assert "- 达人:" not in result
+        assert "姐妹们大家好" in result
+
+    def test_arbitrary_bracket_headers_stripped(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = "【文案案例】\n产品名称：面霜\n姐妹们这款面霜真的太好了！"
+        result = clean_llm_response(text)
+        assert "【文案案例】" not in result
+        assert "姐妹们这款面霜" in result
+
+    def test_trailing_prompt_echo_truncated(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = (
+            "姐妹们大家好！今天给大家推荐一款超级好用的气垫BB霜！\n"
+            "轻薄遮瑕效果超级棒，上脸就像自带滤镜一样！\n"
+            "持久不脱妆，一整天都保持完美状态！\n"
+            "\n---\n\n"
+            "- 达人: 美妆通用达人\n"
+            "- 语气风格: 活泼亲和\n"
+            "\n---\n\n"
+            "- 商品名：气垫BB霜\n"
+            "- 主卖点：轻薄遮瑕\n"
+            "\n---\n\n"
+            "希望这些话术能符合您的需求！"
+        )
+        result = clean_llm_response(text)
+        assert "姐妹们大家好" in result
+        assert "轻薄遮瑕效果超级棒" in result
+        assert "- 达人:" not in result
+        assert "- 商品名" not in result
+        assert "希望这些话术" not in result
+
+
+# =======================================================================
 # Run
 # =======================================================================
 

@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -23,6 +24,62 @@ import aiohttp
 from script_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# LLM response cleaning: strip prompt echo, thinking blocks, metadata lines
+# ---------------------------------------------------------------------------
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# Delimiter injected at end of prompt; everything before it is prompt echo
+GENERATION_DELIMITER = "---话术正文---"
+
+_BRACKET_HEADER_RE = re.compile(r"【[^】]{1,20}】")
+
+_PROMPT_META_PREFIXES = (
+    "- 达人:", "- 达人：", "- 语气风格:", "- 语气风格：",
+    "- 常用口头禅:", "- 常用口头禅：", "- 正式度:", "- 正式度：",
+    "- 目标受众:", "- 目标受众：", "- 商品名:", "- 商品名：",
+    "- 品牌:", "- 品牌：", "- 价格带:", "- 价格带：",
+    "- 核心特征:", "- 核心特征：", "- 主卖点:", "- 主卖点：",
+    "- 合规提醒:", "- 合规提醒：", "- 适当加入",
+    "角色说明：", "角色说明:", "产品名称：", "产品名称:", "卖点：", "卖点:",
+)
+
+
+def clean_llm_response(text: str) -> str:
+    """Strip thinking blocks, prompt echo, and extract actual script content."""
+    if not text:
+        return text
+    # 1. Remove <think>...</think> blocks
+    text = _THINK_RE.sub("", text)
+    # 2. If delimiter exists, take only the content after it
+    if GENERATION_DELIMITER in text:
+        text = text.split(GENERATION_DELIMITER, 1)[1]
+    # 3. Remove any 【...】 bracket headers (prompt section echo)
+    text = _BRACKET_HEADER_RE.sub("", text)
+    # 4. Strip leading metadata lines that are prompt echo
+    lines = text.split("\n")
+    cleaned = []
+    skipping = True
+    for line in lines:
+        s = line.strip()
+        if skipping and (not s or s.startswith(_PROMPT_META_PREFIXES)):
+            continue
+        skipping = False
+        cleaned.append(line)
+    # 5. Truncate trailing noise after "---" separator
+    #    Small models echo prompt metadata or add structured analysis after "---".
+    #    Once we have enough real content, cut at the first trailing "---".
+    result = []
+    content_chars = 0
+    for line in cleaned:
+        s = line.strip()
+        if s == "---" and content_chars >= 40:
+            break
+        result.append(line)
+        content_chars += len(s)
+    return "\n".join(result).strip()
 
 _RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 _FALLBACKABLE_HTTP_STATUS = _RETRYABLE_HTTP_STATUS.union({400, 404, 422})

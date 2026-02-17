@@ -1258,15 +1258,24 @@ class Orchestrator:
             memory_hits = list(state.get("memory_hits", []))
 
             chunks: list[str] = []
-            async for token in self.script_agent.generate_stream(
-                intent_result.slots,
-                profile,
-                session,
-                product=product,
-                memory_hits=memory_hits,
-            ):
-                chunks.append(token)
-                yield token
+            try:
+                async for token in self.script_agent.generate_stream(
+                    intent_result.slots,
+                    profile,
+                    session,
+                    product=product,
+                    memory_hits=memory_hits,
+                ):
+                    chunks.append(token)
+                    yield token
+            except Exception as gen_exc:
+                logger.error(
+                    "[%s] Script generate_stream failed: %s",
+                    trace_id, gen_exc, exc_info=True,
+                )
+                if not chunks:
+                    yield "[生成失败] 话术生成服务暂时不可用，请稍后重试"
+                state["error"] = str(gen_exc)
 
             timing["script_generation"] = (time.perf_counter() - stream_start) * 1000
             content = "".join(chunks).strip()
@@ -1292,11 +1301,13 @@ class Orchestrator:
                 )
                 state["quality_result"] = None
             elif content:
-                state["error"] = (
+                state["error"] = state.get("error") or (
                     f"stream output too short: {len(content)} < {min_chars}"
                 )
-            else:
+                yield "\n\n[提示] 生成内容过短，建议重新生成或补充更多商品信息"
+            elif not state.get("error"):
                 state["error"] = "empty stream output"
+                yield "[生成失败] 未能生成有效话术内容，请检查商品信息后重试"
 
             state["timing"] = timing
             state.update(await self._node_completed(state))

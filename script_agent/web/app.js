@@ -18,92 +18,105 @@ const FLOW = {
 
 // 后端支持的品类 (对齐 SlotExtractor.CATEGORY_KEYWORDS)
 const CATEGORIES = [
-  { id: 'beauty',   label: '\ud83d\udc84 \u7f8e\u5986', value: '\u7f8e\u5986' },
-  { id: 'food',     label: '\ud83c\udf5c \u98df\u54c1', value: '\u98df\u54c1' },
-  { id: 'fashion',  label: '\ud83d\udc57 \u670d\u9970', value: '\u670d\u9970' },
-  { id: 'digital',  label: '\ud83d\udcf1 \u6570\u7801', value: '\u6570\u7801' },
+  { id: 'beauty',   label: '\ud83d\udc84 美妆', value: '美妆' },
+  { id: 'food',     label: '\ud83c\udf5c 食品', value: '食品' },
+  { id: 'fashion',  label: '\ud83d\udc57 服饰', value: '服饰' },
+  { id: 'digital',  label: '\ud83d\udcf1 数码', value: '数码' },
 ];
 
 // 后端支持的话术类型 (对齐 SCENARIO_TEMPLATES)
 const SCRIPT_TYPES = {
   live: [
-    { label: '\ud83d\udc4b \u5f00\u573a\u8bdd\u672f', value: 'opening',        needProduct: false },
-    { label: '\ud83d\udecd\ufe0f \u5356\u70b9\u4ecb\u7ecd', value: 'selling_points', needProduct: true },
-    { label: '\ud83c\udf89 \u4fc3\u9500\u8bdd\u672f', value: 'promotion',      needProduct: true },
+    { label: '\ud83d\udc4b 开场话术', value: 'opening',        needProduct: false },
+    { label: '\ud83d\udecd\ufe0f 卖点介绍', value: 'selling_points', needProduct: true },
+    { label: '\ud83c\udf89 促销话术', value: 'promotion',      needProduct: true },
   ],
   short_video: [
-    { label: '\ud83d\udc4b \u5f00\u573a\u767d', value: 'opening',        needProduct: false },
-    { label: '\ud83d\udecd\ufe0f \u5356\u70b9\u4ecb\u7ecd', value: 'selling_points', needProduct: true },
+    { label: '\ud83d\udc4b 开场白', value: 'opening',        needProduct: false },
+    { label: '\ud83d\udecd\ufe0f 卖点介绍', value: 'selling_points', needProduct: true },
   ],
   seeding: [
-    { label: '\ud83c\udf31 \u79cd\u8349\u6587\u6848', value: 'seeding', needProduct: true },
+    { label: '\ud83c\udf31 种草文案', value: 'seeding', needProduct: true },
   ],
 };
 
 // 类型到后端 sub_scenario 关键词映射
 const TYPE_LABELS = {
-  opening:        '\u5f00\u573a\u767d',
-  selling_points: '\u5356\u70b9\u4ecb\u7ecd',
-  promotion:      '\u4fc3\u9500\u8bdd\u672f',
-  seeding:        '\u79cd\u8349\u6587\u6848',
+  opening:        '开场白',
+  selling_points: '卖点介绍',
+  promotion:      '促销话术',
+  seeding:        '种草文案',
 };
 
 const SCENARIO_LABELS = {
-  live:        '\u76f4\u64ad',
-  short_video: '\u77ed\u89c6\u9891',
-  seeding:     '\u79cd\u8349',
+  live:        '直播',
+  short_video: '短视频',
+  seeding:     '种草',
 };
 
 const PRESET_PRODUCTS = [
   {
-    id: 'beauty-lipstick', name: '\u4e1d\u7ed2\u53e3\u7ea2\u5957\u88c5', brand: '\u5b8c\u7f8e\u65e5\u8bb0',
-    category: '\u7f8e\u5986', emoji: '\ud83d\udc84',
-    features: ['\u4e1d\u7ed2\u54d1\u5149\u8d28\u5730', '\u6301\u4e45\u4e0d\u8131\u8272', '\u6ecb\u6da6\u4e0d\u62d4\u5e72'],
+    id: 'beauty-lipstick', name: '丝绒口红套装', brand: '完美日记',
+    category: '美妆', emoji: '\ud83d\udc84',
+    features: ['丝绒哑光质地', '持久不脱色', '滋润不拔干'],
   },
   {
-    id: 'beauty-serum', name: '\u73bb\u5c3f\u9178\u7cbe\u534e\u6db2', brand: '\u858f\u8bfa\u5a1c',
-    category: '\u7f8e\u5986', emoji: '\u2728',
-    features: ['\u9ad8\u6d53\u5ea6\u73bb\u5c3f\u9178', '\u6df1\u5c42\u8865\u6c34', '\u654f\u611f\u808c\u9002\u7528'],
+    id: 'beauty-serum', name: '玻尿酸精华液', brand: '薏诺娜',
+    category: '美妆', emoji: '\u2728',
+    features: ['高浓度玻尿酸', '深层补水', '敏感肌适用'],
   },
   {
-    id: 'beauty-cushion', name: '\u6c14\u57abBB\u971c', brand: '\u82b1\u897f\u5b50',
-    category: '\u7f8e\u5986', emoji: '\ud83e\ude9e',
-    features: ['\u8f7b\u8584\u670d\u5e16', '\u517b\u80a4\u6210\u5206', '\u6301\u598612\u5c0f\u65f6'],
+    id: 'beauty-cushion', name: '气垫BB霜', brand: '花西子',
+    category: '美妆', emoji: '\ud83e\ude9e',
+    features: ['轻薄服帖', '养肤成分', '持妆12小时'],
   },
   {
-    id: 'food-nuts', name: '\u6bcf\u65e5\u575a\u679c\u793c\u76d2', brand: '\u4e09\u53ea\u677e\u9f20',
-    category: '\u98df\u54c1', emoji: '\ud83e\udd5c',
-    features: ['6\u79cd\u575a\u679c\u6df7\u5408', '\u9501\u9c9c\u5c0f\u5305\u88c5', '\u96f6\u6dfb\u52a0'],
+    id: 'food-nuts', name: '每日坚果礼盒', brand: '三只松鼠',
+    category: '食品', emoji: '\ud83e\udd5c',
+    features: ['6种坚果混合', '锁鲜小包装', '零添加'],
   },
   {
-    id: 'food-snack', name: '\u4f4e\u5361\u9b54\u828b\u723d', brand: '\u536b\u9f99',
-    category: '\u98df\u54c1', emoji: '\ud83c\udf5c',
-    features: ['\u4f4e\u5361\u96f6\u98df', '\u591a\u79cd\u53e3\u5473', '\u89e3\u998b\u4e0d\u6015\u80d6'],
+    id: 'food-snack', name: '低卡魔芋爽', brand: '卫龙',
+    category: '食品', emoji: '\ud83c\udf5c',
+    features: ['低卡零食', '多种口味', '解馋不怕胖'],
   },
   {
-    id: 'fashion-dress', name: '\u6cd5\u5f0f\u788e\u82b1\u8fde\u8863\u88d9', brand: 'UR',
-    category: '\u670d\u9970', emoji: '\ud83d\udc57',
-    features: ['\u6cd5\u5f0f\u6d6a\u6f2b\u98ce', '\u663e\u7626A\u5b57\u7248\u578b', '\u900f\u6c14\u9762\u6599'],
+    id: 'fashion-dress', name: '法式碎花连衣裙', brand: 'UR',
+    category: '服饰', emoji: '\ud83d\udc57',
+    features: ['法式浪漫风', '显瘦A字版型', '透气面料'],
   },
   {
-    id: 'fashion-tshirt', name: '\u91cd\u78c5\u7eaf\u68c9T\u6064', brand: 'Bosie',
-    category: '\u670d\u9970', emoji: '\ud83d\udc55',
-    features: ['260g\u91cd\u78c5\u68c9', '\u5bbd\u677e\u5ed3\u5f62', '\u4e0d\u53d8\u5f62\u4e0d\u7f29\u6c34'],
+    id: 'fashion-tshirt', name: '重磅纯棉T恤', brand: 'Bosie',
+    category: '服饰', emoji: '\ud83d\udc55',
+    features: ['260g重磅棉', '宽松廓形', '不变形不缩水'],
   },
   {
-    id: 'digital-earbuds', name: '\u964d\u566a\u84dd\u7259\u8033\u673a', brand: '\u6f2b\u6b65\u8005',
-    category: '\u6570\u7801', emoji: '\ud83c\udfa7',
-    features: ['\u4e3b\u52a8\u964d\u566a', '30\u5c0f\u65f6\u7eed\u822a', 'IP67\u9632\u6c34'],
+    id: 'digital-earbuds', name: '降噪蓝牙耳机', brand: '漫步者',
+    category: '数码', emoji: '\ud83c\udfa7',
+    features: ['主动降噪', '30小时续航', 'IP67防水'],
   },
   {
-    id: 'digital-charger', name: '\u6c2e\u5316\u956d\u5feb\u5145\u5934', brand: '\u5b89\u514b',
-    category: '\u6570\u7801', emoji: '\ud83d\udd0b',
-    features: ['65W\u5feb\u5145', '\u6c2e\u5316\u956d\u5c0f\u5de7', '\u591a\u534f\u8bae\u517c\u5bb9'],
+    id: 'digital-charger', name: '氮化镓快充头', brand: '安克',
+    category: '数码', emoji: '\ud83d\udd0b',
+    features: ['65W快充', '氮化镓小巧', '多协议兼容'],
   },
 ];
 
 const BOT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 const CLIENT_CONFIG_KEY = 'script_agent_frontend_config_v1';
+
+const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const REGEN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+const EXPORT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+
+const STEPPER_STEPS = ['scenario', 'category', 'type', 'product', 'generate'];
+
+const CATEGORY_DOT_MAP = {
+  '美妆': 'beauty',
+  '食品': 'food',
+  '服饰': 'fashion',
+  '数码': 'digital',
+};
 
 // ── State ─────────────────────────────────────────────────
 
@@ -116,24 +129,34 @@ const appState = {
   product: null,
   streamReader: null,
   isStreaming: false,
+  lastQuery: null,
+  genStartTime: null,
 };
 
 // ── DOM refs ──────────────────────────────────────────────
 
-const chatArea      = document.getElementById('chatArea');
-const quickReplies  = document.getElementById('quickReplies');
-const textInputWrap = document.getElementById('textInputWrap');
-const userInput     = document.getElementById('userInput');
-const sendBtn       = document.getElementById('sendBtn');
-const newSessionBtn = document.getElementById('newSessionBtn');
-const connToggleBtn = document.getElementById('connToggleBtn');
-const connPanel = document.getElementById('connPanel');
-const apiBaseUrl = document.getElementById('apiBaseUrl');
-const tenantIdInput = document.getElementById('tenantIdInput');
-const roleInput = document.getElementById('roleInput');
-const apiKeyInput = document.getElementById('apiKeyInput');
+const chatArea         = document.getElementById('chatArea');
+const quickReplies     = document.getElementById('quickReplies');
+const textInputWrap    = document.getElementById('textInputWrap');
+const userInput        = document.getElementById('userInput');
+const sendBtn          = document.getElementById('sendBtn');
+const newSessionBtn    = document.getElementById('newSessionBtn');
+const connToggleBtn    = document.getElementById('connToggleBtn');
+const connPanel        = document.getElementById('connPanel');
+const apiBaseUrl       = document.getElementById('apiBaseUrl');
+const tenantIdInput    = document.getElementById('tenantIdInput');
+const roleInput        = document.getElementById('roleInput');
+const apiKeyInput      = document.getElementById('apiKeyInput');
 const bearerTokenInput = document.getElementById('bearerTokenInput');
-const saveConnBtn = document.getElementById('saveConnBtn');
+const saveConnBtn      = document.getElementById('saveConnBtn');
+const sidebar          = document.getElementById('sidebar');
+const sessionList      = document.getElementById('sessionList');
+const sidebarToggleBtn = document.getElementById('sidebarToggleBtn');
+const sidebarOpenBtn   = document.getElementById('sidebarOpenBtn');
+const flowStepper      = document.getElementById('flowStepper');
+const statusDot        = document.getElementById('statusDot');
+const statsBar         = document.getElementById('statsBar');
+const toastContainer   = document.getElementById('toastContainer');
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -181,11 +204,319 @@ function saveClientConfig() {
   localStorage.setItem(CLIENT_CONFIG_KEY, JSON.stringify(cfg));
 }
 
+// ── Toast Notification System ─────────────────────────────
+
+function showToast(message, type, durationMs) {
+  type = type || 'info';
+  durationMs = durationMs || 3000;
+
+  var icons = { success: '\u2705', error: '\u274c', info: '\u2139\ufe0f' };
+
+  var toast = document.createElement('div');
+  toast.className = 'toast toast-' + type;
+  toast.innerHTML =
+    '<span class="toast-icon">' + (icons[type] || icons.info) + '</span>' +
+    '<span>' + escapeHtml(message) + '</span>';
+
+  toastContainer.appendChild(toast);
+
+  setTimeout(function() {
+    toast.classList.add('toast-exit');
+    setTimeout(function() {
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+    }, 300);
+  }, durationMs);
+}
+
+// ── Status Indicator ──────────────────────────────────────
+
+function setStatus(state) {
+  statusDot.className = 'status-dot status-' + state;
+  var titles = {
+    idle: '就绪',
+    connected: '已连接',
+    generating: '生成中...',
+    error: '出错',
+  };
+  statusDot.title = titles[state] || state;
+}
+
+// ── Flow Stepper ──────────────────────────────────────────
+
+function updateStepper(currentStep) {
+  var stepIndex = STEPPER_STEPS.indexOf(currentStep);
+  if (stepIndex < 0) {
+    flowStepper.classList.add('hidden');
+    return;
+  }
+
+  flowStepper.classList.remove('hidden');
+  var steps = flowStepper.querySelectorAll('.step');
+  for (var i = 0; i < steps.length; i++) {
+    steps[i].classList.remove('step-completed', 'step-active');
+    if (i < stepIndex) {
+      steps[i].classList.add('step-completed');
+    } else if (i === stepIndex) {
+      steps[i].classList.add('step-active');
+    }
+  }
+}
+
+// ── Grid Canvas Background ────────────────────────────────
+
+function initGridCanvas() {
+  var canvas = document.getElementById('gridCanvas');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var dpr = window.devicePixelRatio || 1;
+  var spacing = 40;
+  var dotSize = 1;
+  var offset = 0;
+  var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function resize() {
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.scale(dpr, dpr);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+    ctx.fillStyle = 'rgba(0, 229, 255, 0.6)';
+
+    var w = canvas.width / dpr;
+    var h = canvas.height / dpr;
+    var drift = reducedMotion ? 0 : Math.sin(offset * 0.005) * 5;
+
+    for (var x = drift; x < w; x += spacing) {
+      for (var y = drift; y < h; y += spacing) {
+        ctx.beginPath();
+        ctx.arc(x, y, dotSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    if (!reducedMotion) {
+      offset++;
+      requestAnimationFrame(draw);
+    }
+  }
+
+  resize();
+  window.addEventListener('resize', resize);
+  draw();
+}
+
+// ── Typing Indicator ──────────────────────────────────────
+
+function showTypingIndicator() {
+  hideTypingIndicator();
+  var el = document.createElement('div');
+  el.className = 'msg msg-assistant';
+  el.id = 'typing-indicator';
+  el.innerHTML = '<div class="msg-avatar">' + BOT_SVG + '</div>' +
+    '<div class="msg-body"><div class="typing-indicator">' +
+    '<span></span><span></span><span></span></div></div>';
+  chatArea.appendChild(el);
+  scrollToBottom();
+}
+
+function hideTypingIndicator() {
+  var el = document.getElementById('typing-indicator');
+  if (el) el.remove();
+}
+
+// ── Stats Bar ─────────────────────────────────────────────
+
+function showStats(generationTimeMs, tokenCount) {
+  document.getElementById('statTime').textContent = '\u23f1 ' + (generationTimeMs / 1000).toFixed(1) + 's';
+  document.getElementById('statTokens').textContent = '\ud83d\udcdd ~' + tokenCount + ' tokens';
+  document.getElementById('statQuality').textContent = '';
+  statsBar.classList.remove('hidden');
+}
+
+function hideStats() {
+  statsBar.classList.add('hidden');
+}
+
+// ── Script Action Buttons ─────────────────────────────────
+
+function addScriptActions(msgId) {
+  var msgEl = document.getElementById(msgId);
+  if (!msgEl) return;
+
+  var actionsDiv = document.createElement('div');
+  actionsDiv.className = 'script-actions';
+
+  var copyBtn = document.createElement('button');
+  copyBtn.className = 'script-action-btn';
+  copyBtn.innerHTML = COPY_SVG + '<span>复制</span>';
+  copyBtn.addEventListener('click', function() { copyScript(msgId); });
+
+  var regenBtn = document.createElement('button');
+  regenBtn.className = 'script-action-btn';
+  regenBtn.innerHTML = REGEN_SVG + '<span>重新生成</span>';
+  regenBtn.addEventListener('click', function() { regenerateScript(); });
+
+  var exportBtn = document.createElement('button');
+  exportBtn.className = 'script-action-btn';
+  exportBtn.innerHTML = EXPORT_SVG + '<span>导出</span>';
+  exportBtn.addEventListener('click', function() { exportScript(msgId); });
+
+  actionsDiv.appendChild(copyBtn);
+  actionsDiv.appendChild(regenBtn);
+  actionsDiv.appendChild(exportBtn);
+  msgEl.querySelector('.msg-body').appendChild(actionsDiv);
+}
+
+function copyScript(msgId) {
+  var el = document.getElementById(msgId);
+  if (!el) return;
+  var text = el.querySelector('.msg-content').textContent;
+  try {
+    navigator.clipboard.writeText(text).then(function() {
+      showToast('已复制到剪贴板', 'success');
+    });
+  } catch (_) {
+    // fallback
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    showToast('已复制到剪贴板', 'success');
+  }
+}
+
+function regenerateScript() {
+  if (!appState.lastQuery || !appState.sessionId) return;
+  appState.flowState = FLOW.GENERATING;
+  doStreamGeneration(appState.lastQuery);
+}
+
+function exportScript(msgId) {
+  var el = document.getElementById(msgId);
+  if (!el) return;
+  var text = el.querySelector('.msg-content').textContent;
+  var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'script-' + Date.now() + '.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('已导出文件', 'success');
+}
+
+// ── Session Sidebar ───────────────────────────────────────
+
+function toggleSidebar() {
+  sidebar.classList.toggle('collapsed');
+  sidebarOpenBtn.classList.toggle('hidden', !sidebar.classList.contains('collapsed'));
+}
+
+async function loadSessionList() {
+  try {
+    var res = await fetch(buildApiUrl('/api/v1/sessions'), {
+      method: 'GET',
+      headers: collectHeaders(),
+    });
+    if (!res.ok) {
+      sessionList.innerHTML = '<div class="session-empty">无法加载历史</div>';
+      return;
+    }
+    var sessions = await res.json();
+    renderSessionList(sessions);
+  } catch (_) {
+    sessionList.innerHTML = '<div class="session-empty">无法加载历史</div>';
+  }
+}
+
+function renderSessionList(sessions) {
+  sessionList.innerHTML = '';
+  if (!sessions || sessions.length === 0) {
+    sessionList.innerHTML = '<div class="session-empty">暂无会话记录</div>';
+    return;
+  }
+
+  for (var i = 0; i < sessions.length; i++) {
+    var s = sessions[i];
+    var item = document.createElement('div');
+    item.className = 'session-item' + (s.session_id === appState.sessionId ? ' active' : '');
+    item.dataset.sessionId = s.session_id;
+
+    var dotClass = CATEGORY_DOT_MAP[s.category] || 'default';
+    item.innerHTML =
+      '<span class="session-dot session-dot-' + dotClass + '"></span>' +
+      '<div class="session-info">' +
+        '<div class="session-name">' + escapeHtml(s.influencer_name || s.session_id) + '</div>' +
+        '<div class="session-meta">' + escapeHtml(s.category || '') + '</div>' +
+      '</div>';
+
+    item.addEventListener('click', (function(sid) {
+      return function() { switchToSession(sid); };
+    })(s.session_id));
+
+    sessionList.appendChild(item);
+  }
+}
+
+async function switchToSession(sessionId) {
+  if (appState.isStreaming && appState.streamReader) {
+    appState.streamReader.cancel();
+    appState.streamReader = null;
+    appState.isStreaming = false;
+  }
+
+  try {
+    var res = await fetch(buildApiUrl('/api/v1/sessions/' + sessionId), {
+      method: 'GET',
+      headers: collectHeaders(),
+    });
+    if (!res.ok) {
+      showToast('无法加载会话', 'error');
+      return;
+    }
+    var detail = await res.json();
+
+    chatArea.innerHTML = '';
+    hideAllInputs();
+    hideStats();
+
+    appState.sessionId = sessionId;
+    appState.flowState = FLOW.CHAT;
+
+    // Render turn history
+    if (detail.turns && detail.turns.length > 0) {
+      for (var i = 0; i < detail.turns.length; i++) {
+        var turn = detail.turns[i];
+        if (turn.user) addUserMessage(turn.user);
+        if (turn.assistant) addAssistantMessage(turn.assistant);
+      }
+    }
+
+    showTextInput('继续对话...');
+    setStatus('connected');
+    updateStepper('generate');
+
+    // Update active state in sidebar
+    var items = sessionList.querySelectorAll('.session-item');
+    for (var j = 0; j < items.length; j++) {
+      items[j].classList.toggle('active', items[j].dataset.sessionId === sessionId);
+    }
+
+  } catch (err) {
+    showToast('切换会话失败: ' + err.message, 'error');
+  }
+}
+
 // ── Message Rendering ─────────────────────────────────────
 
 function addAssistantMessage(text) {
-  const id = 'msg-' + Date.now() + Math.random().toString(36).slice(2, 6);
-  const el = document.createElement('div');
+  var id = 'msg-' + Date.now() + Math.random().toString(36).slice(2, 6);
+  var el = document.createElement('div');
   el.className = 'msg msg-assistant';
   el.id = id;
   el.innerHTML =
@@ -199,7 +530,7 @@ function addAssistantMessage(text) {
 }
 
 function addUserMessage(text) {
-  const el = document.createElement('div');
+  var el = document.createElement('div');
   el.className = 'msg msg-user';
   el.innerHTML =
     '<div class="msg-body"><div class="msg-content">' +
@@ -210,8 +541,8 @@ function addUserMessage(text) {
 }
 
 function addStreamingMessage() {
-  const id = 'msg-' + Date.now() + Math.random().toString(36).slice(2, 6);
-  const el = document.createElement('div');
+  var id = 'msg-' + Date.now() + Math.random().toString(36).slice(2, 6);
+  var el = document.createElement('div');
   el.className = 'msg msg-assistant streaming';
   el.id = id;
   el.innerHTML =
@@ -224,14 +555,14 @@ function addStreamingMessage() {
 }
 
 function updateStreamingMessage(msgId, token) {
-  const el = document.getElementById(msgId);
+  var el = document.getElementById(msgId);
   if (!el) return;
   el.querySelector('.msg-content').textContent += token;
   scrollToBottom();
 }
 
 function finalizeStreamingMessage(msgId) {
-  const el = document.getElementById(msgId);
+  var el = document.getElementById(msgId);
   if (!el) return;
   el.classList.remove('streaming');
 }
@@ -241,14 +572,17 @@ function finalizeStreamingMessage(msgId) {
 function showQuickReplies(options) {
   hideAllInputs();
   quickReplies.classList.remove('hidden');
-  for (const opt of options) {
-    const btn = document.createElement('button');
+  for (var i = 0; i < options.length; i++) {
+    var opt = options[i];
+    var btn = document.createElement('button');
     btn.className = 'chip';
     btn.textContent = opt.label;
-    btn.addEventListener('click', () => {
-      hideAllInputs();
-      advanceFlow(opt.value);
-    });
+    btn.addEventListener('click', (function(val) {
+      return function() {
+        hideAllInputs();
+        advanceFlow(val);
+      };
+    })(opt.value));
     quickReplies.appendChild(btn);
   }
 }
@@ -257,35 +591,49 @@ function showProductCards() {
   hideAllInputs();
   quickReplies.classList.remove('hidden');
 
-  const grid = document.createElement('div');
+  var grid = document.createElement('div');
   grid.className = 'product-grid';
 
   // 按已选品类过滤商品
-  const filtered = PRESET_PRODUCTS.filter(
-    p => p.category === appState.category
-  );
+  var filtered = PRESET_PRODUCTS.filter(function(p) {
+    return p.category === appState.category;
+  });
 
-  for (const p of filtered) {
-    const card = document.createElement('button');
+  for (var i = 0; i < filtered.length; i++) {
+    var p = filtered[i];
+    var card = document.createElement('button');
     card.className = 'product-card';
+
+    var tagsHtml = '';
+    if (p.features && p.features.length > 0) {
+      tagsHtml = '<div class="product-tags">';
+      for (var j = 0; j < p.features.length; j++) {
+        tagsHtml += '<span class="product-tag">' + escapeHtml(p.features[j]) + '</span>';
+      }
+      tagsHtml += '</div>';
+    }
+
     card.innerHTML =
       '<span class="product-emoji">' + p.emoji + '</span>' +
       '<span class="product-name">' + escapeHtml(p.name) + '</span>' +
-      '<span class="product-brand">' + escapeHtml(p.brand) + '</span>';
-    card.addEventListener('click', () => {
-      hideAllInputs();
-      advanceFlow(p);
-    });
+      '<span class="product-brand">' + escapeHtml(p.brand) + '</span>' +
+      tagsHtml;
+    card.addEventListener('click', (function(prod) {
+      return function() {
+        hideAllInputs();
+        advanceFlow(prod);
+      };
+    })(p));
     grid.appendChild(card);
   }
 
-  const customCard = document.createElement('button');
+  var customCard = document.createElement('button');
   customCard.className = 'product-card product-card-custom';
   customCard.innerHTML =
     '<span class="product-emoji">\u270f\ufe0f</span>' +
-    '<span class="product-name">\u81ea\u5b9a\u4e49\u5546\u54c1</span>' +
-    '<span class="product-brand">\u8f93\u5165\u5546\u54c1\u540d\u79f0</span>';
-  customCard.addEventListener('click', () => {
+    '<span class="product-name">自定义商品</span>' +
+    '<span class="product-brand">输入商品名称</span>';
+  customCard.addEventListener('click', function() {
     hideAllInputs();
     advanceFlow('custom');
   });
@@ -298,7 +646,7 @@ function showTextInput(placeholder) {
   hideAllInputs();
   textInputWrap.classList.remove('hidden');
   userInput.value = '';
-  userInput.placeholder = placeholder || '\u7ee7\u7eed\u5bf9\u8bdd...';
+  userInput.placeholder = placeholder || '继续对话...';
   userInput.style.height = 'auto';
   sendBtn.disabled = true;
   userInput.focus();
@@ -307,19 +655,19 @@ function showTextInput(placeholder) {
 // ── API Layer ─────────────────────────────────────────────
 
 function buildApiUrl(path) {
-  const base = (apiBaseUrl && apiBaseUrl.value ? apiBaseUrl.value : '').trim();
+  var base = (apiBaseUrl && apiBaseUrl.value ? apiBaseUrl.value : '').trim();
   if (!base) return path;
   return base.replace(/\/+$/, '') + path;
 }
 
 function collectHeaders() {
-  const headers = {
+  var headers = {
     'Content-Type': 'application/json',
   };
-  const tenantId = (tenantIdInput && tenantIdInput.value ? tenantIdInput.value : '').trim();
-  const role = (roleInput && roleInput.value ? roleInput.value : '').trim();
-  const apiKey = (apiKeyInput && apiKeyInput.value ? apiKeyInput.value : '').trim();
-  const bearerToken = (bearerTokenInput && bearerTokenInput.value ? bearerTokenInput.value : '').trim();
+  var tenantId = (tenantIdInput && tenantIdInput.value ? tenantIdInput.value : '').trim();
+  var role = (roleInput && roleInput.value ? roleInput.value : '').trim();
+  var apiKey = (apiKeyInput && apiKeyInput.value ? apiKeyInput.value : '').trim();
+  var bearerToken = (bearerTokenInput && bearerTokenInput.value ? bearerTokenInput.value : '').trim();
 
   if (tenantId) headers['X-Tenant-Id'] = tenantId;
   if (role) headers['X-Role'] = role;
@@ -329,7 +677,7 @@ function collectHeaders() {
 }
 
 async function createSession(influencerName, category) {
-  const res = await fetch(buildApiUrl('/api/v1/sessions'), {
+  var res = await fetch(buildApiUrl('/api/v1/sessions'), {
     method: 'POST',
     headers: collectHeaders(),
     body: JSON.stringify({
@@ -338,41 +686,43 @@ async function createSession(influencerName, category) {
     }),
   });
   if (!res.ok) throw new Error('Session creation failed: ' + res.status);
-  const data = await res.json();
+  var data = await res.json();
   return data.session_id;
 }
 
 async function generateStream(sessionId, query, onToken, onDone, onError) {
-  const res = await fetch(buildApiUrl('/api/v1/generate/stream'), {
+  var res = await fetch(buildApiUrl('/api/v1/generate/stream'), {
     method: 'POST',
     headers: collectHeaders(),
     body: JSON.stringify({ session_id: sessionId, query: query }),
   });
   if (!res.ok) {
-    const text = await res.text();
+    var text = await res.text();
     throw new Error('Generate failed: ' + res.status + ' ' + text);
   }
 
-  const reader = res.body.getReader();
+  var reader = res.body.getReader();
   appState.streamReader = reader;
-  const decoder = new TextDecoder();
-  let buffer = '';
+  var decoder = new TextDecoder();
+  var buffer = '';
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      var result = await reader.read();
+      if (result.done) break;
+      buffer += decoder.decode(result.value, { stream: true });
 
       while (true) {
-        const idx = buffer.indexOf('\n\n');
+        var idx = buffer.indexOf('\n\n');
         if (idx < 0) break;
-        const raw = buffer.slice(0, idx);
+        var raw = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
 
-        for (const line of raw.split('\n')) {
+        var lines = raw.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
           if (!line.startsWith('data: ')) continue;
-          const token = line.slice(6);
+          var token = line.slice(6);
           if (token === '[DONE]') { onDone(); return; }
           if (token.startsWith('[ERROR]')) { onError(token); return; }
           onToken(token);
@@ -388,23 +738,23 @@ async function generateStream(sessionId, query, onToken, onDone, onError) {
 // ── Query Construction ────────────────────────────────────
 
 function buildQuery() {
-  var scenarioLabel = SCENARIO_LABELS[appState.scenario] || '\u76f4\u64ad';
-  var typeLabel = TYPE_LABELS[appState.scriptType] || '\u5f00\u573a\u767d';
-  var categoryLabel = appState.category || '\u7f8e\u5986';
+  var scenarioLabel = SCENARIO_LABELS[appState.scenario] || '直播';
+  var typeLabel = TYPE_LABELS[appState.scriptType] || '开场白';
+  var categoryLabel = appState.category || '美妆';
 
-  var query = '\u8bf7\u4e3a\u6211\u751f\u6210\u4e00\u6bb5' + categoryLabel + scenarioLabel + typeLabel + '\u8bdd\u672f';
+  var query = '请为我生成一段' + categoryLabel + scenarioLabel + typeLabel + '话术';
 
   if (appState.product) {
-    query += '\uff0c\u5546\u54c1\uff1a' + appState.product.name;
+    query += '，商品：' + appState.product.name;
     if (appState.product.brand) {
-      query += '\uff0c\u54c1\u724c\uff1a' + appState.product.brand;
+      query += '，品牌：' + appState.product.brand;
     }
     if (appState.product.features && appState.product.features.length > 0) {
-      query += '\uff0c\u5356\u70b9\uff1a' + appState.product.features.join('\u3001');
+      query += '，卖点：' + appState.product.features.join('、');
     }
   }
 
-  query += '\uff0c\u8bed\u6c14\u8981\u70ed\u60c5\u6709\u611f\u67d3\u529b\u3002';
+  query += '，语气要热情有感染力。';
   return query;
 }
 
@@ -412,7 +762,19 @@ function buildQuery() {
 
 async function doStreamGeneration(query) {
   hideAllInputs();
-  const msgId = addStreamingMessage();
+  hideStats();
+  setStatus('generating');
+  appState.lastQuery = query;
+  appState.genStartTime = Date.now();
+
+  showTypingIndicator();
+
+  // Brief delay so typing indicator is visible
+  await new Promise(function(r) { setTimeout(r, 400); });
+
+  hideTypingIndicator();
+  var msgId = addStreamingMessage();
+  var charCount = 0;
 
   try {
     await generateStream(
@@ -420,26 +782,34 @@ async function doStreamGeneration(query) {
       query,
       function onToken(token) {
         updateStreamingMessage(msgId, token);
+        charCount += token.length;
       },
       function onDone() {
         finalizeStreamingMessage(msgId);
+        addScriptActions(msgId);
         appState.flowState = FLOW.CHAT;
         appState.isStreaming = false;
-        showTextInput('\u7ee7\u7eed\u5bf9\u8bdd\uff0c\u4f8b\u5982\uff1a\u6362\u4e00\u4e2a\u66f4\u6d3b\u6cfc\u7684\u98ce\u683c...');
+        setStatus('connected');
+        var elapsed = Date.now() - appState.genStartTime;
+        showStats(elapsed, Math.max(1, Math.round(charCount / 1.5)));
+        showTextInput('继续对话，例如：换一个更活泼的风格...');
+        loadSessionList();
       },
       function onError(errorMsg) {
         finalizeStreamingMessage(msgId);
-        addAssistantMessage('\u751f\u6210\u51fa\u73b0\u95ee\u9898\uff1a' + errorMsg);
+        addAssistantMessage('生成出现问题：' + errorMsg);
         appState.flowState = FLOW.CHAT;
         appState.isStreaming = false;
+        setStatus('error');
         showTextInput();
       }
     );
   } catch (err) {
     finalizeStreamingMessage(msgId);
-    addAssistantMessage('\u51fa\u73b0\u9519\u8bef\uff1a' + err.message);
+    addAssistantMessage('出现错误：' + err.message);
     appState.flowState = FLOW.CHAT;
     appState.isStreaming = false;
+    setStatus('error');
     showTextInput();
   }
 }
@@ -451,11 +821,12 @@ async function advanceFlow(input) {
 
     case FLOW.INIT: {
       appState.flowState = FLOW.SELECT_SCENARIO;
-      addAssistantMessage('\u4f60\u597d\uff01\u6211\u662f\u4f60\u7684\u8bdd\u672f\u52a9\u624b\n\u8bf7\u9009\u62e9\u4f60\u60f3\u8981\u751f\u6210\u7684\u573a\u666f\uff1a');
+      updateStepper('scenario');
+      addAssistantMessage('你好！我是你的话术助手\n请选择你想要生成的场景：');
       showQuickReplies([
-        { label: '\ud83c\udfa4 \u76f4\u64ad\u5e26\u8d27', value: 'live' },
-        { label: '\ud83c\udfac \u77ed\u89c6\u9891',   value: 'short_video' },
-        { label: '\ud83c\udf31 \u79cd\u8349\u6587\u6848', value: 'seeding' },
+        { label: '\ud83c\udfa4 直播带货', value: 'live' },
+        { label: '\ud83c\udfac 短视频',   value: 'short_video' },
+        { label: '\ud83c\udf31 种草文案', value: 'seeding' },
       ]);
       break;
     }
@@ -464,7 +835,8 @@ async function advanceFlow(input) {
       appState.scenario = input;
       addUserMessage(SCENARIO_LABELS[input] || input);
       appState.flowState = FLOW.SELECT_CATEGORY;
-      addAssistantMessage('\u8bf7\u9009\u62e9\u5546\u54c1\u54c1\u7c7b\uff1a');
+      updateStepper('category');
+      addAssistantMessage('请选择商品品类：');
       showQuickReplies(CATEGORIES.map(function(c) {
         return { label: c.label, value: c.value };
       }));
@@ -474,13 +846,16 @@ async function advanceFlow(input) {
     case FLOW.SELECT_CATEGORY: {
       appState.category = input;
       addUserMessage(input);
+      updateStepper('type');
 
       // 创建 session（用实际品类而非硬编码）
       try {
-        appState.sessionId = await createSession('\u5c0f\u96c5', appState.category);
+        appState.sessionId = await createSession('小雅', appState.category);
+        setStatus('connected');
       } catch (err) {
-        addAssistantMessage('\u521b\u5efa\u4f1a\u8bdd\u5931\u8d25\uff0c\u8bf7\u5237\u65b0\u91cd\u8bd5\u3002');
+        addAssistantMessage('创建会话失败，请刷新重试。');
         appState.flowState = FLOW.ERROR;
+        setStatus('error');
         break;
       }
 
@@ -489,12 +864,13 @@ async function advanceFlow(input) {
       // 种草文案只有一种类型，直接跳到商品选择
       if (types.length === 1 && types[0].needProduct) {
         appState.scriptType = types[0].value;
-        addAssistantMessage('\u8bf7\u9009\u62e9\u8981\u63a8\u8350\u7684\u5546\u54c1\uff1a');
+        addAssistantMessage('请选择要推荐的商品：');
         appState.flowState = FLOW.SELECT_PRODUCT;
+        updateStepper('product');
         showProductCards();
       } else {
         appState.flowState = FLOW.SELECT_TYPE;
-        addAssistantMessage('\u60f3\u8981\u751f\u6210\u54ea\u79cd\u7c7b\u578b\u7684\u8bdd\u672f\uff1f');
+        addAssistantMessage('想要生成哪种类型的话术？');
         showQuickReplies(types.map(function(t) {
           return { label: t.label, value: t.value };
         }));
@@ -513,10 +889,12 @@ async function advanceFlow(input) {
 
       if (needProduct) {
         appState.flowState = FLOW.SELECT_PRODUCT;
-        addAssistantMessage('\u8bf7\u9009\u62e9\u8981\u63a8\u8350\u7684\u5546\u54c1\uff0c\u6216\u8005\u8f93\u5165\u81ea\u5b9a\u4e49\u5546\u54c1\u540d\u79f0\uff1a');
+        updateStepper('product');
+        addAssistantMessage('请选择要推荐的商品，或者输入自定义商品名称：');
         showProductCards();
       } else {
         appState.flowState = FLOW.GENERATING;
+        updateStepper('generate');
         await doStreamGeneration(buildQuery());
       }
       break;
@@ -525,12 +903,13 @@ async function advanceFlow(input) {
     case FLOW.SELECT_PRODUCT: {
       if (input === 'custom') {
         appState.flowState = FLOW.CUSTOM_PRODUCT;
-        addAssistantMessage('\u8bf7\u8f93\u5165\u5546\u54c1\u540d\u79f0\uff1a');
-        showTextInput('\u8f93\u5165\u5546\u54c1\u540d\u79f0...');
+        addAssistantMessage('请输入商品名称：');
+        showTextInput('输入商品名称...');
       } else {
         appState.product = input;
         addUserMessage(input.name);
         appState.flowState = FLOW.GENERATING;
+        updateStepper('generate');
         await doStreamGeneration(buildQuery());
       }
       break;
@@ -540,6 +919,7 @@ async function advanceFlow(input) {
       appState.product = { id: 'custom', name: input, brand: '', category: appState.category || '', features: [] };
       addUserMessage(input);
       appState.flowState = FLOW.GENERATING;
+      updateStepper('generate');
       await doStreamGeneration(buildQuery());
       break;
     }
@@ -556,7 +936,7 @@ async function advanceFlow(input) {
 // ── Event Handlers ────────────────────────────────────────
 
 function handleSend() {
-  const text = userInput.value.trim();
+  var text = userInput.value.trim();
   if (!text || appState.isStreaming) return;
   userInput.value = '';
   userInput.style.height = 'auto';
@@ -564,7 +944,7 @@ function handleSend() {
   advanceFlow(text);
 }
 
-userInput.addEventListener('input', () => {
+userInput.addEventListener('input', function() {
   // auto-grow
   userInput.style.height = 'auto';
   userInput.style.height = Math.min(userInput.scrollHeight, 120) + 'px';
@@ -572,7 +952,7 @@ userInput.addEventListener('input', () => {
   sendBtn.disabled = !userInput.value.trim() || appState.isStreaming;
 });
 
-userInput.addEventListener('keydown', (e) => {
+userInput.addEventListener('keydown', function(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     handleSend();
@@ -581,7 +961,7 @@ userInput.addEventListener('keydown', (e) => {
 
 sendBtn.addEventListener('click', handleSend);
 
-newSessionBtn.addEventListener('click', () => {
+newSessionBtn.addEventListener('click', function() {
   if (appState.isStreaming && appState.streamReader) {
     appState.streamReader.cancel();
     appState.streamReader = null;
@@ -590,14 +970,38 @@ newSessionBtn.addEventListener('click', () => {
   init();
 });
 
-connToggleBtn.addEventListener('click', () => {
+connToggleBtn.addEventListener('click', function() {
   connPanel.classList.toggle('hidden');
 });
 
-saveConnBtn.addEventListener('click', () => {
+saveConnBtn.addEventListener('click', function() {
   saveClientConfig();
-  addAssistantMessage('\u8fde\u63a5\u914d\u7f6e\u5df2\u4fdd\u5b58\u3002');
+  showToast('连接配置已保存', 'success');
   connPanel.classList.add('hidden');
+});
+
+sidebarToggleBtn.addEventListener('click', function() {
+  toggleSidebar();
+});
+
+sidebarOpenBtn.addEventListener('click', function() {
+  toggleSidebar();
+});
+
+// ── Keyboard Shortcuts ────────────────────────────────────
+
+document.addEventListener('keydown', function(e) {
+  // Ctrl+Enter or Cmd+Enter: send message
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    handleSend();
+  }
+  // Escape: close connection panel
+  if (e.key === 'Escape') {
+    if (!connPanel.classList.contains('hidden')) {
+      connPanel.classList.add('hidden');
+    }
+  }
 });
 
 // ── Initialization ────────────────────────────────────────
@@ -606,6 +1010,7 @@ async function init() {
   loadClientConfig();
   chatArea.innerHTML = '';
   hideAllInputs();
+  hideStats();
 
   appState.flowState = FLOW.INIT;
   appState.sessionId = null;
@@ -613,6 +1018,12 @@ async function init() {
   appState.category = null;
   appState.scriptType = null;
   appState.product = null;
+  appState.lastQuery = null;
+
+  setStatus('idle');
+  updateStepper(null);
+  initGridCanvas();
+  loadSessionList();
 
   await advanceFlow();
 }

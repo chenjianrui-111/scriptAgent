@@ -20,7 +20,11 @@ from script_agent.models.context import (
     SessionContext,
 )
 from script_agent.context.session_compressor import SessionContextCompressor
-from script_agent.services.llm_client import LLMServiceClient
+from script_agent.services.llm_client import (
+    LLMServiceClient,
+    clean_llm_response,
+    GENERATION_DELIMITER,
+)
 from script_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -111,12 +115,21 @@ class PromptBuilder:
         if requirements:
             parts.append(f"\n【额外要求】{requirements}")
 
+        # 7. 生成分隔符 — 告诉模型从此处开始输出话术正文
+        parts.append(f"\n{GENERATION_DELIMITER}")
+
         return "\n".join(parts)
 
     def _build_role_prompt(self, profile: InfluencerProfile) -> str:
         return f"""你是一个专业的电商{profile.category or ''}话术创作专家。
 请根据以下达人信息和场景要求，生成高质量的话术内容。
-确保内容符合达人个人风格，具有吸引力和互动性，同时遵守平台规范。"""
+确保内容符合达人个人风格，具有吸引力和互动性，同时遵守平台规范。
+
+重要输出规则：
+- 在"{GENERATION_DELIMITER}"标记之后直接输出话术正文
+- 不要重复任何提示语、角色设定、风格描述或商品信息
+- 不要输出思考过程、分析或格式化标题
+- 只输出可以直接在直播/短视频中使用的话术文案"""
 
     def _build_style_prompt(self, profile: InfluencerProfile) -> str:
         style = profile.style
@@ -319,6 +332,9 @@ class ScriptGenerationAgent(BaseAgent):
             request_id=f"{session.session_id}:stream",
             stream_mode=True,
         )
+        if not content or not content.strip():
+            logger.warning("generate_stream received empty content from LLM")
+            return
         sensitive = self.sensitive_filter.contains_sensitive(content)
         if sensitive:
             logger.warning("Sensitive content detected during streaming")
@@ -339,13 +355,14 @@ class ScriptGenerationAgent(BaseAgent):
         stream_mode: bool = False,
     ) -> str:
         if not stream_mode:
-            return await self.llm.generate_sync(
+            raw = await self.llm.generate_sync(
                 prompt,
                 category=category,
                 max_tokens=800,
                 request_id=request_id,
                 prefer_fallback=prefer_fallback,
             )
+            return clean_llm_response(raw)
 
         buffer = []
         async for token in self.llm.generate(
@@ -355,7 +372,7 @@ class ScriptGenerationAgent(BaseAgent):
             prefer_fallback=prefer_fallback,
         ):
             buffer.append(token)
-        return "".join(buffer)
+        return clean_llm_response("".join(buffer))
 
     async def _generate_with_retry(
         self,
