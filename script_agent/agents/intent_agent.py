@@ -49,10 +49,18 @@ class SlotExtractor:
         "年货节": "年货节", "38节": "38女王节", "双12": "双十二",
     }
     PRODUCT_NAME_PATTERNS = [
-        re.compile(r"(?:商品|产品|单品|款式)[:：\s]*([\u4e00-\u9fffA-Za-z0-9\-]{2,24})(?:的|，|,|\s|$)"),
+        re.compile(r"(?:商品|产品|单品|款式)[:：\s]*([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?=的|，|,|\s|$)"),
         re.compile(r"[「「]([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)[」」]"),
-        re.compile(r"(?:这款|这个|该)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?:的|，|,|\s|$)"),
+        re.compile(r"(?:这款|这个|该)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?=的|，|,|\s|$)"),
+        re.compile(r"(?:换成|换为|改成|改为|切换到|讲讲|说说|介绍|推荐|安利)([\u4e00-\u9fffA-Za-z0-9\-]{2,24}?)(?=吧|呢|的|，|,|。|\s|$)"),
     ]
+    PRODUCT_PREFIX_CLEAN_RE = re.compile(r"^(?:新品|新的|新款|这款|这个|该|产品|商品|品|款)+")
+    PRODUCT_LEADING_NOISE_RE = re.compile(r"^(?:换成|换为|改成|改为|介绍|推荐|安利|讲讲|说说)+")
+    PRODUCT_TRAILING_NOISE_RE = re.compile(r"(?:的)?(?:卖点|话术|介绍|文案|直播)(?:内容)?$")
+    PRODUCT_STOPWORDS = {
+        "直播", "话术", "开场", "卖点", "介绍", "产品", "商品", "文案",
+        "风格", "内容", "一下", "一个", "继续", "再来",
+    }
 
     def extract(self, query: str, intent: str = "") -> Dict[str, Any]:
         slots: Dict[str, Any] = {}
@@ -112,8 +120,10 @@ class SlotExtractor:
         for pattern in self.PRODUCT_NAME_PATTERNS:
             match = pattern.search(query)
             if match:
-                slots["product_name"] = match.group(1).strip()
-                break
+                candidate = self._normalize_product_name(match.group(1))
+                if candidate:
+                    slots["product_name"] = candidate
+                    break
         if "卖点" in query:
             # e.g. 卖点：成分安全、持妆久
             for sep in ("卖点:", "卖点："):
@@ -129,6 +139,22 @@ class SlotExtractor:
                     break
 
         return slots
+
+    def _normalize_product_name(self, value: str) -> str:
+        name = (value or "").strip()
+        if not name:
+            return ""
+        name = self.PRODUCT_PREFIX_CLEAN_RE.sub("", name).strip()
+        name = self.PRODUCT_LEADING_NOISE_RE.sub("", name).strip()
+        name = self.PRODUCT_TRAILING_NOISE_RE.sub("", name).strip()
+        if not name:
+            return ""
+        if name in self.PRODUCT_STOPWORDS:
+            return ""
+        # 避免把明显指令词当成商品名
+        if any(k in name for k in ("话术", "文案", "直播")) and len(name) <= 4:
+            return ""
+        return name
 
 
 # ========================================================================
@@ -411,14 +437,24 @@ class IntentRecognitionAgent(BaseAgent):
             confidence = llm_result.get("confidence", confidence)
 
         # Step 3: 槽位提取
-        slots = self.slot_extractor.extract(query, intent)
+        extracted_slots = self.slot_extractor.extract(query, intent)
 
         # Step 4: 指代消解 (多轮对话关键)
         resolved = self.reference_resolver.resolve(query, session)
-        slots.update(resolved)
+        # 显式抽取优先于继承槽位，避免“换品”时被旧商品覆盖
+        slots = dict(resolved)
+        slots.update(extracted_slots)
 
         # Step 5: 上下文补全
         slots = self._fill_from_context(slots, session)
+
+        # Step 5.1: 换品场景纠偏
+        intent, slots = self._apply_product_switch_adjustment(
+            query=query,
+            intent=intent,
+            slots=slots,
+            session=session,
+        )
 
         # Step 6: 检查是否需要澄清
         clarification = None
@@ -475,6 +511,45 @@ class IntentRecognitionAgent(BaseAgent):
                 slots["product_name"] = cached_product.get("name", "")
 
         return slots
+
+    def _apply_product_switch_adjustment(
+        self,
+        query: str,
+        intent: str,
+        slots: Dict[str, Any],
+        session: SessionContext,
+    ) -> tuple[str, Dict[str, Any]]:
+        current_product = ""
+        if session.slot_context.slots.get("product_name"):
+            current_product = str(session.slot_context.slots.get("product_name", "")).strip()
+        if not current_product:
+            cached_product = session.entity_cache.get_latest("product")
+            if cached_product:
+                current_product = str(cached_product.get("name", "")).strip()
+
+        new_product = str(slots.get("product_name", "")).strip()
+        if not current_product or not new_product:
+            return intent, slots
+        if self._normalize_entity(current_product) == self._normalize_entity(new_product):
+            return intent, slots
+
+        switch_keywords = ("换成", "换为", "改成", "改为", "切换", "不要", "别讲", "介绍", "推荐", "讲")
+        is_switch = any(k in query for k in switch_keywords) or bool(slots.get("_continuation"))
+        if not is_switch:
+            return intent, slots
+
+        slots["_product_switch"] = True
+        slots["_previous_product_name"] = current_product
+        slots.pop("target_content_id", None)
+
+        # “换商品”本质是新一轮生成，不应走 script_modification
+        if intent in {"script_modification", "script_optimization"}:
+            intent = "script_generation"
+            slots["_intent_adjusted"] = "product_switch_to_generation"
+        return intent, slots
+
+    def _normalize_entity(self, value: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", (value or "")).lower()
 
     async def _llm_intent_recognition(self, query: str,
                                        session: SessionContext) -> Dict:

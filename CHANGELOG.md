@@ -5,6 +5,33 @@
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-02-18
+
+### Added
+
+- 新增 API 级换品端到端用例（`tests/test_auth_and_history_features.py`）：
+  - `/sessions -> /generate(旧商品) -> /generate(换新品)`
+  - 断言“换品后文案必须包含新商品名，且不再包含旧商品名”
+- 新增换品意图/槽位回归测试（`tests/test_agents.py`）：
+  - 续写换品时优先使用新商品槽位
+  - 换品场景下意图从 `script_modification` 纠偏为 `script_generation`
+
+### Changed
+
+- 强化商品名抽取规则（`script_agent/agents/intent_agent.py`）：
+  - 支持“换成/改成/介绍/推荐”等换品表达
+  - 增加商品名噪声清洗（前后缀去噪，避免“卫龙辣条的卖点话术”误抽取）
+- 意图识别流程调整（`script_agent/agents/intent_agent.py`）：
+  - 显式抽取槽位优先于继承槽位，防止多轮对话中旧商品覆盖新商品
+  - 增加 `_product_switch` / `_previous_product_name` / `_intent_adjusted` 标记
+- 扩展 `script_generation` 工具入参 schema（`script_agent/skills/builtin/script_gen.py`）：
+  - 接受换品内部标记字段，避免 preflight 被 `additionalProperties=false` 拦截
+
+### Fixed
+
+- 修复“多轮对话换品后仍沿用旧商品”导致文案错误的问题。
+- 修复换品标记字段触发工具 schema 拦截，导致生成失败的问题。
+
 ## [1.5.0] - 2026-02-18
 
 ### Added

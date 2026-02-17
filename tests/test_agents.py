@@ -152,6 +152,16 @@ class TestIntentAgent:
         assert "小金瓶精华" in slots.get("product_name", "")
         assert "成分安全" in slots.get("selling_points", [])
 
+    def test_slot_extraction_product_switch_phrase(self):
+        from script_agent.agents.intent_agent import SlotExtractor
+
+        extractor = SlotExtractor()
+        slots = extractor.extract(
+            "后面想让你介绍新的品卫龙辣条，做直播卖点话术",
+            "script_generation",
+        )
+        assert slots.get("product_name") == "卫龙辣条"
+
     def test_reference_resolver(self):
         from script_agent.agents.intent_agent import ReferenceResolver
         from script_agent.models.context import SessionContext, EntityCache
@@ -190,6 +200,73 @@ class TestIntentAgent:
             "category": "美妆", "scenario": "直播带货"
         })
         assert result is None  # 无需澄清
+
+    def test_continuation_switch_product_keeps_new_product(self):
+        from script_agent.agents.intent_agent import IntentRecognitionAgent
+        from script_agent.models.context import SessionContext
+        from script_agent.models.message import AgentMessage
+
+        async def _test():
+            session = SessionContext()
+            session.slot_context.update(
+                "script_generation",
+                {
+                    "category": "食品",
+                    "scenario": "直播带货",
+                    "product_name": "三只松鼠零食",
+                },
+            )
+            session.entity_cache.update("product", "p-old", "三只松鼠零食")
+
+            agent = IntentRecognitionAgent()
+            agent._fast_classify = lambda _q: ("script_generation", 0.95)
+            msg = AgentMessage(
+                payload={
+                    "query": "再来一段，介绍卫龙辣条的卖点话术",
+                    "session": session,
+                }
+            )
+            resp = await agent(msg)
+            result = resp.payload["intent_result"]
+            assert result.intent == "script_generation"
+            assert result.slots.get("product_name") == "卫龙辣条"
+            assert result.slots.get("_product_switch") is True
+            assert result.slots.get("_previous_product_name") == "三只松鼠零食"
+
+        asyncio.run(_test())
+
+    def test_product_switch_adjusts_intent_to_generation(self):
+        from script_agent.agents.intent_agent import IntentRecognitionAgent
+        from script_agent.models.context import SessionContext
+        from script_agent.models.message import AgentMessage
+
+        async def _test():
+            session = SessionContext()
+            session.slot_context.update(
+                "script_generation",
+                {
+                    "category": "食品",
+                    "scenario": "直播带货",
+                    "product_name": "三只松鼠零食",
+                },
+            )
+            session.entity_cache.update("product", "p-old", "三只松鼠零食")
+
+            agent = IntentRecognitionAgent()
+            agent._fast_classify = lambda _q: ("script_modification", 0.92)
+            msg = AgentMessage(
+                payload={
+                    "query": "把产品换成卫龙辣条，重新来一段卖点介绍",
+                    "session": session,
+                }
+            )
+            resp = await agent(msg)
+            result = resp.payload["intent_result"]
+            assert result.intent == "script_generation"
+            assert result.slots.get("product_name") == "卫龙辣条"
+            assert result.slots.get("_intent_adjusted") == "product_switch_to_generation"
+
+        asyncio.run(_test())
 
 
 # =======================================================================
