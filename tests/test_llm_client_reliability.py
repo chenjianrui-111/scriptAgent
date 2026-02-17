@@ -195,3 +195,16 @@ def test_clean_llm_response_strips_prompt_echo_markdown_blocks():
     assert "商品名" not in cleaned
     assert "本轮要求" not in cleaned
     assert "卫龙辣条" in cleaned
+
+
+def test_clean_llm_response_strips_inline_prompt_echo_fragments():
+    raw = (
+        "---话术正文---\n"
+        "姐妹们，今天主推卫龙辣条，香辣过瘾超上头！"
+        "（语气保持一致，但信息表达要有新增，不要整段复述）\n"
+        "现在下单还有直播间专属加赠。"
+    )
+    cleaned = clean_llm_response(raw)
+    assert "语气保持一致" not in cleaned
+    assert "不要整段复述" not in cleaned
+    assert "卫龙辣条" in cleaned

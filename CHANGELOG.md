@@ -5,6 +5,36 @@
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-02-17
+
+### Added
+
+- 新增回归测试（`tests/test_agents.py`）：
+  - `test_stream_skill_execution_failure_emits_error_token`
+  - 覆盖 `skill_executing` 分支失败时流式输出必须返回 `[ERROR]`
+- 新增回归测试（`tests/test_llm_client_reliability.py`）：
+  - `test_clean_llm_response_strips_inline_prompt_echo_fragments`
+  - 覆盖“语气保持一致/不要整段复述”等内联提示词回显清洗
+
+### Changed
+
+- 流式编排容错增强（`script_agent/agents/orchestrator.py`）：
+  - `skill_executing` 路径在无有效脚本时不再静默结束
+  - 统一显式返回 `[ERROR] <message>`，避免前端出现空白结果
+- 前端流式交互增强（`script_agent/web/app.js`）：
+  - 增加空流保护（仅空白 token 视为无效输出）
+  - 空流时移除占位消息并展示错误提示
+  - 错误分支清洗 `[ERROR]` 前缀，提升用户可读性
+- 清洗与质检规则增强：
+  - `script_agent/services/llm_client.py` 增加内联回显短语强清洗
+  - `script_agent/agents/script_agent.py` 增加二次内联回显剥离与回显判定
+  - `script_agent/agents/quality_agent.py` 扩展 prompt-echo 规则，识别“本轮要求/不要整段复述”等泄漏
+
+### Fixed
+
+- 修复多轮生成结果中夹带限制性提示词（如“语气保持一致，但信息表达要有新增，不要整段复述”）的问题。
+- 修复换品等多轮场景下 `skill_executing` 失败时流式无输出导致前端“空气泡”的问题。
+
 ## [1.5.2] - 2026-02-17
 
 ### Added

@@ -58,6 +58,29 @@ _PROMPT_META_INLINE_RE = re.compile(
     r"^\s*(?:\*\*)?(本轮要求|上一版话术摘要|上版话术核心)(?:\*\*)?\s*[:：]"
 )
 _PLACEHOLDER_LINE_RE = re.compile(r"^\s*(---|\.{3}|…)\s*$")
+_INLINE_PROMPT_ECHO_PATTERNS = (
+    re.compile(
+        r"[（(【\[]?\s*本轮要求\s*[:：]?\s*"
+        r"[^。！？!?\n）)】\]]{0,180}[）)】\]]?"
+    ),
+    re.compile(
+        r"[（(【\[]?\s*(?:上一版话术摘要|上版话术核心)\s*[:：]?\s*"
+        r"[^。！？!?\n）)】\]]{0,220}[）)】\]]?"
+    ),
+    re.compile(
+        r"[（(【\[]?\s*语气保持一致"
+        r"[^。！？!?\n）)】\]]{0,220}?不要整段复述[）)】\]]?"
+    ),
+)
+
+
+def _strip_inline_prompt_echo(text: str) -> str:
+    cleaned = text or ""
+    for pattern in _INLINE_PROMPT_ECHO_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def clean_llm_response(text: str) -> str:
@@ -113,7 +136,7 @@ def clean_llm_response(text: str) -> str:
             break
         result.append(line)
         content_chars += len(s)
-    return "\n".join(result).strip()
+    return _strip_inline_prompt_echo("\n".join(result).strip())
 
 _RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 _FALLBACKABLE_HTTP_STATUS = _RETRYABLE_HTTP_STATUS.union({400, 404, 422})

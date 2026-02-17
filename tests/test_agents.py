@@ -725,6 +725,82 @@ class TestOrchestrator:
         assert "太短" not in body
         assert "生成内容过短" in body
 
+    def test_stream_skill_execution_failure_emits_error_token(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from script_agent.models.context import (
+            InfluencerProfile,
+            ProductProfile,
+            SessionContext,
+        )
+        from script_agent.models.message import IntentResult
+        from script_agent.skills.base import SkillResult
+
+        class DummyIntentAgent:
+            async def __call__(self, message):
+                return message.create_response(
+                    payload={
+                        "intent_result": IntentResult(
+                            intent="script_generation",
+                            confidence=0.95,
+                            slots={"category": "美妆", "scenario": "直播带货"},
+                        )
+                    },
+                    source="intent",
+                )
+
+        class DummyProfileAgent:
+            async def fetch(self, slots):
+                return InfluencerProfile(
+                    influencer_id="inf-skill-fail",
+                    name="失败测试达人",
+                    category=slots.get("category", "美妆"),
+                )
+
+        class DummyProductAgent:
+            async def fetch(self, slots, profile, session, query=""):
+                return ProductProfile(name="玻尿酸精华液", category="美妆"), []
+
+        class FailingSkill:
+            name = "script_generation"
+
+            async def execute(self, context):
+                return SkillResult(success=False, message="话术生成失败：模型不可用")
+
+        class DummyMemoryRetriever:
+            async def remember_script(self, **kwargs):
+                return None
+
+        orch = Orchestrator()
+        orch.intent_agent = DummyIntentAgent()
+        orch.profile_agent = DummyProfileAgent()
+        orch.product_agent = DummyProductAgent()
+        orch.memory_retriever = DummyMemoryRetriever()
+        failing_skill = FailingSkill()
+        orch.skill_registry.route = (
+            lambda intent, slots: failing_skill if intent == "script_generation" else None
+        )
+        orch.skill_registry.get = (
+            lambda name: failing_skill if name == "script_generation" else None
+        )
+        orch.skill_registry.preflight = lambda **kwargs: None
+
+        session = SessionContext(session_id="s-stream-skill-fail", tenant_id="t1", category="美妆")
+
+        async def _run():
+            chunks = []
+            async for token in orch.handle_stream(
+                query="帮我写一段美妆直播卖点介绍",
+                session=session,
+                trace_id="trace-stream-skill-fail",
+            ):
+                chunks.append(token)
+            return "".join(chunks)
+
+        body = asyncio.run(_run())
+        assert body.startswith("[ERROR]")
+        assert "模型不可用" in body
+        assert len(session.turns) == 0
+
     def test_stream_quality_retry_for_incomplete_tail(self):
         from script_agent.agents.orchestrator import Orchestrator
         from script_agent.models.context import (

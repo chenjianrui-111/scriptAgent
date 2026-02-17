@@ -261,6 +261,10 @@ class GenerationStructureChecker:
         "会话目标摘要",
         "对话上下文",
         "本轮要求",
+        "上一版话术摘要",
+        "上版话术核心",
+        "信息表达要有新增",
+        "不要整段复述",
     )
     _heading_re = re.compile(
         r"^\s*#{1,6}\s*(?:\*\*)?(商品名|内容描述|核心卖点|商品信息|达人风格|会话目标摘要|对话上下文)(?:\*\*)?(?:\s*[:：].*)?\s*$"
@@ -303,6 +307,15 @@ class GenerationStructureChecker:
         return len(issues) == 0, issues
 
     def _looks_like_prompt_echo(self, text: str) -> bool:
+        inline_hits = (
+            "本轮要求",
+            "上一版话术摘要",
+            "上版话术核心",
+            "不要整段复述",
+            "信息表达要有新增",
+        )
+        if any(token in (text or "") for token in inline_hits):
+            return True
         lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
         if not lines:
             return False

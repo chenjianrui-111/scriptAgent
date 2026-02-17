@@ -344,6 +344,20 @@ class ScriptGenerationAgent(BaseAgent):
         self._meta_sentence_re = re.compile(
             r"^\s*(?:\*\*)?(本轮要求|上一版话术摘要|上版话术核心)(?:\*\*)?\s*[:：]"
         )
+        self._inline_prompt_echo_patterns = (
+            re.compile(
+                r"[（(【\[]?\s*本轮要求\s*[:：]?\s*"
+                r"[^。！？!?\n）)】\]]{0,180}[）)】\]]?"
+            ),
+            re.compile(
+                r"[（(【\[]?\s*(?:上一版话术摘要|上版话术核心)\s*[:：]?\s*"
+                r"[^。！？!?\n）)】\]]{0,220}[）)】\]]?"
+            ),
+            re.compile(
+                r"[（(【\[]?\s*语气保持一致"
+                r"[^。！？!?\n）)】\]]{0,220}?不要整段复述[）)】\]]?"
+            ),
+        )
         self._tail_incomplete_suffixes = (
             "的", "了", "和", "与", "及", "并", "在", "让", "把", "将",
             "就", "也", "都", "更", "而", "并且", "以及", "等",
@@ -684,6 +698,7 @@ class ScriptGenerationAgent(BaseAgent):
                 continue
             lines.append(line)
         cleaned = "\n".join(lines).strip()
+        cleaned = self._strip_inline_prompt_echo(cleaned)
         return self._dedupe_sentences(cleaned)
 
     def _dedupe_sentences(self, text: str) -> str:
@@ -726,6 +741,15 @@ class ScriptGenerationAgent(BaseAgent):
         return None
 
     def _is_prompt_echo(self, text: str) -> bool:
+        inline_markers = (
+            "本轮要求",
+            "上一版话术摘要",
+            "上版话术核心",
+            "信息表达要有新增",
+            "不要整段复述",
+        )
+        if any(marker in text for marker in inline_markers):
+            return True
         marker_hits = 0
         markers = ("商品名", "主卖点", "核心特征", "合规提醒", "语气风格", "达人")
         for m in markers:
@@ -744,6 +768,14 @@ class ScriptGenerationAgent(BaseAgent):
             or (meta_like >= 2 and marker_hits >= 1)
             or (markdown_heading >= 1 and marker_hits >= 1)
         )
+
+    def _strip_inline_prompt_echo(self, text: str) -> str:
+        cleaned = text or ""
+        for pattern in self._inline_prompt_echo_patterns:
+            cleaned = pattern.sub("", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
     def _effective_content_length(self, text: str) -> int:
         if not text:

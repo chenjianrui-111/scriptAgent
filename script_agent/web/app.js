@@ -658,6 +658,12 @@ function finalizeStreamingMessage(msgId) {
   el.classList.remove('streaming');
 }
 
+function removeStreamingMessage(msgId) {
+  var el = document.getElementById(msgId);
+  if (!el || !el.parentNode) return;
+  el.parentNode.removeChild(el);
+}
+
 // ── Input Controls ────────────────────────────────────────
 
 function showQuickReplies(options) {
@@ -880,6 +886,7 @@ async function doStreamGeneration(query) {
   hideTypingIndicator();
   var msgId = addStreamingMessage();
   var charCount = 0;
+  var meaningfulCharCount = 0;
 
   try {
     await generateStream(
@@ -888,8 +895,18 @@ async function doStreamGeneration(query) {
       function onToken(token) {
         updateStreamingMessage(msgId, token);
         charCount += token.length;
+        meaningfulCharCount += String(token || '').replace(/\s/g, '').length;
       },
       function onDone() {
+        if (meaningfulCharCount <= 0) {
+          removeStreamingMessage(msgId);
+          addAssistantMessage('生成失败：未返回有效内容，请重试。');
+          appState.flowState = FLOW.CHAT;
+          appState.isStreaming = false;
+          setStatus('error');
+          showTextInput();
+          return;
+        }
         finalizeStreamingMessage(msgId);
         addScriptActions(msgId);
         appState.flowState = FLOW.CHAT;
@@ -901,8 +918,13 @@ async function doStreamGeneration(query) {
         loadSessionList();
       },
       function onError(errorMsg) {
-        finalizeStreamingMessage(msgId);
-        addAssistantMessage('生成出现问题：' + errorMsg);
+        if (meaningfulCharCount <= 0) {
+          removeStreamingMessage(msgId);
+        } else {
+          finalizeStreamingMessage(msgId);
+        }
+        var cleanErr = String(errorMsg || '').replace(/^\[ERROR\]\s*/, '').trim();
+        addAssistantMessage('生成出现问题：' + (cleanErr || '请稍后重试'));
         appState.flowState = FLOW.CHAT;
         appState.isStreaming = false;
         setStatus('error');

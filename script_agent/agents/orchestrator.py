@@ -1231,9 +1231,16 @@ class Orchestrator:
             if route == "skill_executing":
                 state.update(await self._node_skill_executing(state))
                 state.update(await self._node_completed(state))
-                script = state.get("result", {}).get("script") or state.get("script")
-                if script and script.content:
+                result_payload = state.get("result", {})
+                script = result_payload.get("script") or state.get("script")
+                if script and script.content and script.content.strip():
                     yield script.content
+                    return
+                error_msg = str(
+                    result_payload.get("error")
+                    or "生成失败，请稍后重试"
+                ).strip()
+                yield f"[ERROR] {error_msg}"
                 return
 
             state.update(await self._node_profile_fetching(state))
