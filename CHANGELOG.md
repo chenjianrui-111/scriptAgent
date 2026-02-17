@@ -5,6 +5,56 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-02-18
+
+### Added
+
+- 新增账号体系与认证接口：
+  - `POST /api/v1/auth/register`
+  - `POST /api/v1/auth/login`
+  - 本地 SQLite 用户存储（`script_agent/api/auth.py`）
+- 新增前端登录注册页：
+  - `GET /auth`
+  - `script_agent/web/auth.html`
+  - `script_agent/web/auth.js`
+- 新增会话历史删除能力：
+  - `DELETE /api/v1/sessions/{session_id}`
+  - 前端会话侧边栏删除按钮联动
+- 新增达人/商品基础数据仓储：
+  - `script_agent/services/domain_data_repository.py`
+  - `ProfileAgent`、`ProductAgent` 支持优先读取数据库资料并回退原有构建逻辑
+- 新增部署/配置样例与架构文档：
+  - `.env.production.example`
+  - `docs/architecture.mmd`
+  - `docs/architecture_prompt_for_gemini.md`
+- 新增测试覆盖：
+  - `tests/test_auth_and_history_features.py`
+  - `tests/test_domain_data_integration.py`
+  - 前端 SSE 多行 chunk 兼容测试
+
+### Changed
+
+- 认证链路增强（`script_agent/api/auth.py`）：
+  - 生产环境支持 Bearer JWT + API Key 鉴权
+  - 鉴权上下文增加 `role` 并透传到会话快照
+- API 层增强（`script_agent/api/app.py`）：
+  - 新增 `GET /api/v1/frontend-config` 用于前端环境感知配置
+  - 流式输出改为规范 SSE 多行 `data:` 编码，增强客户端兼容性
+- 前端主页面（`script_agent/web/app.js`）：
+  - 增加登录状态按钮（登录/退出）
+  - 生产环境无 token 时引导跳转登录页
+  - 支持从本地 token 自动注入 `Authorization` 请求头
+- LLM 主后端可配置：
+  - 新增 `LLM_PRIMARY_BACKEND`
+  - 默认策略：`development/testing -> zhipu`，`production -> vllm`
+- 配置样例扩展（`.env.example`）：
+  - 新增 domain data / auth / frontend 暴露控制相关环境变量
+
+### Fixed
+
+- 修复流式接口在 chunk 含换行时的 SSE 格式兼容问题。
+- 修复 `orchestrator` 在流式场景下“先输出后校验”导致短内容提示不稳定的问题（改为聚合后校验再输出）。
+
 ## [1.4.0] - 2026-02-17
 
 ### Added

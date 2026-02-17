@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ScriptAgent - 登录注册</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <canvas id="gridCanvas" aria-hidden="true"></canvas>
+  <div class="bg-orb bg-orb-1" aria-hidden="true"></div>
+  <div class="bg-orb bg-orb-2" aria-hidden="true"></div>
+  <div class="bg-orb bg-orb-3" aria-hidden="true"></div>
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <main class="auth-shell">
+    <section class="auth-card">
+      <div class="auth-header">
+        <h1>ScriptAgent 账号中心</h1>
+        <p id="authEnvTag">环境检测中...</p>
+      </div>
+
+      <div class="auth-tabs">
+        <button id="tabLogin" class="auth-tab auth-tab-active" type="button">登录</button>
+        <button id="tabRegister" class="auth-tab" type="button">注册</button>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <label>
+          用户名
+          <input id="loginUsername" type="text" minlength="3" maxlength="64" required />
+        </label>
+        <label>
+          密码
+          <input id="loginPassword" type="password" minlength="6" maxlength="128" required />
+        </label>
+        <button id="loginSubmitBtn" class="btn-pill btn-pill-primary auth-submit" type="submit">登录并进入系统</button>
+      </form>
+
+      <form id="registerForm" class="auth-form hidden">
+        <label>
+          用户名
+          <input id="registerUsername" type="text" minlength="3" maxlength="64" required />
+        </label>
+        <label>
+          密码
+          <input id="registerPassword" type="password" minlength="6" maxlength="128" required />
+        </label>
+        <label>
+          Tenant ID
+          <input id="registerTenantId" type="text" value="tenant_dev" minlength="1" maxlength="64" required />
+        </label>
+        <button id="registerSubmitBtn" class="btn-pill auth-submit" type="submit">创建账号</button>
+      </form>
+
+      <div class="auth-footer">
+        <a href="/">返回主页面</a>
+      </div>
+    </section>
+  </main>
+
+  <script src="/web/auth.js"></script>
+</body>
+</html>

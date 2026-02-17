@@ -1267,7 +1267,6 @@ class Orchestrator:
                     memory_hits=memory_hits,
                 ):
                     chunks.append(token)
-                    yield token
             except Exception as gen_exc:
                 logger.error(
                     "[%s] Script generate_stream failed: %s",
@@ -1281,6 +1280,8 @@ class Orchestrator:
             content = "".join(chunks).strip()
             min_chars = max(1, settings.llm.script_min_chars)
             if content and len(content) >= min_chars:
+                for token in chunks:
+                    yield token
                 state["script"] = GeneratedScript(
                     content=content,
                     category=(

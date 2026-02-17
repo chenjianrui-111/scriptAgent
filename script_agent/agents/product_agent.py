@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from script_agent.agents.base import BaseAgent
 from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
 from script_agent.models.message import AgentMessage
+from script_agent.services.domain_data_repository import DomainDataRepository
 from script_agent.services.long_term_memory import LongTermMemoryRetriever, RecallQuery
 
 logger = logging.getLogger(__name__)
@@ -44,10 +45,15 @@ class ProductKnowledgeBase:
 
 
 class ProductAgent(BaseAgent):
-    def __init__(self, memory: Optional[LongTermMemoryRetriever] = None):
+    def __init__(
+        self,
+        memory: Optional[LongTermMemoryRetriever] = None,
+        repository: Optional[DomainDataRepository] = None,
+    ):
         super().__init__(name="product")
         self._knowledge = ProductKnowledgeBase()
         self._memory = memory or LongTermMemoryRetriever()
+        self._repository = repository or DomainDataRepository()
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         slots = dict(message.payload.get("slots", {}))
@@ -55,7 +61,17 @@ class ProductAgent(BaseAgent):
         session: SessionContext = message.payload.get("session", SessionContext())
         query: str = message.payload.get("query", "")
 
-        product = self._build_product_profile(slots, profile)
+        db_product = await self._repository.get_product_profile(
+            product_id=str(slots.get("product_id", "")).strip(),
+            name=str(slots.get("product_name", "")).strip(),
+            category=str(slots.get("category") or profile.category or "").strip(),
+        )
+        if db_product:
+            logger.info(
+                "Product DB HIT: %s",
+                db_product.product_id or db_product.name,
+            )
+        product = self._build_product_profile(slots, profile, db_product=db_product)
         memory_hits = await self._recall_memories(
             query=query,
             session=session,
@@ -99,29 +115,51 @@ class ProductAgent(BaseAgent):
         self,
         slots: Dict[str, Any],
         profile: InfluencerProfile,
+        db_product: Optional[ProductProfile] = None,
     ) -> ProductProfile:
-        category = slots.get("category") or profile.category or "通用"
+        category = (
+            slots.get("category")
+            or (db_product.category if db_product else "")
+            or profile.category
+            or "通用"
+        )
         name = (slots.get("product_name") or "").strip()
+        if not name and db_product:
+            name = db_product.name
         if not name and slots.get("requirements"):
-            name = self._guess_product_name(slots["requirements"])
+            name = self._guess_product_name(str(slots["requirements"]))
         if not name:
             name = f"{category}商品"
 
-        features = self._to_list(slots.get("product_features"))
-        selling_points = self._to_list(slots.get("selling_points"))
-        default_points, default_notes = self._knowledge.build_defaults(category)
+        slot_features = self._to_list(slots.get("product_features"))
+        db_features = list(db_product.features) if db_product else []
+        features = self._merge_unique(slot_features + db_features)
 
-        merged_points = list(dict.fromkeys(selling_points + features + default_points))
+        slot_selling_points = self._to_list(slots.get("selling_points"))
+        db_selling_points = list(db_product.selling_points) if db_product else []
+        default_points, default_notes = self._knowledge.build_defaults(category)
+        compliance_notes = self._merge_unique(
+            (list(db_product.compliance_notes) if db_product else [])
+            + default_notes
+        )
+
+        merged_points = self._merge_unique(
+            slot_selling_points + db_selling_points + features + default_points
+        )
         return ProductProfile(
-            product_id=slots.get("product_id", ""),
+            product_id=slots.get("product_id", "") or (db_product.product_id if db_product else ""),
             name=name,
             category=category,
-            brand=slots.get("brand", ""),
-            price_range=slots.get("price_range", ""),
+            brand=slots.get("brand", "") or (db_product.brand if db_product else ""),
+            price_range=slots.get("price_range", "") or (db_product.price_range if db_product else ""),
             features=features,
             selling_points=merged_points[:8],
-            target_audience=slots.get("target_audience", profile.audience_age_range),
-            compliance_notes=default_notes,
+            target_audience=(
+                slots.get("target_audience", "")
+                or (db_product.target_audience if db_product else "")
+                or profile.audience_age_range
+            ),
+            compliance_notes=compliance_notes,
         )
 
     async def _recall_memories(
@@ -180,3 +218,6 @@ class ProductAgent(BaseAgent):
         if isinstance(value, str):
             return [s.strip() for s in re.split(r"[，,、;；/\n]", value) if s.strip()]
         return []
+
+    def _merge_unique(self, values: List[str]) -> List[str]:
+        return [k for k in dict.fromkeys(v.strip() for v in values if v and v.strip())]

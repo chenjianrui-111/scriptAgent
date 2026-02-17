@@ -45,6 +45,7 @@ _PROMPT_META_PREFIXES = (
     "- 合规提醒:", "- 合规提醒：", "- 适当加入",
     "角色说明：", "角色说明:", "产品名称：", "产品名称:", "卖点：", "卖点:",
 )
+_SEPARATOR_LINE_RE = re.compile(r"^[-—_=*`]{2,}$")
 
 
 def clean_llm_response(text: str) -> str:
@@ -68,6 +69,16 @@ def clean_llm_response(text: str) -> str:
             continue
         skipping = False
         cleaned.append(line)
+    # 4.1 Remove leading separator-only lines like "---"
+    while cleaned:
+        head = cleaned[0].strip()
+        if not head:
+            cleaned.pop(0)
+            continue
+        if _SEPARATOR_LINE_RE.match(head):
+            cleaned.pop(0)
+            continue
+        break
     # 5. Truncate trailing noise after "---" separator
     #    Small models echo prompt metadata or add structured analysis after "---".
     #    Once we have enough real content, cut at the first trailing "---".
@@ -572,17 +583,7 @@ class LLMServiceClient:
     def __init__(self, env: Optional[str] = None):
         env = env or settings.llm.env
         self._fallback_backend: Optional[LLMBackend] = None
-        if env == "production":
-            self.backend: LLMBackend = VLLMBackend(
-                base_url=settings.llm.vllm_base_url,
-                model=settings.llm.vllm_model,
-                adapter_map=settings.llm.vllm_adapter_map,
-            )
-        else:
-            self.backend = OllamaBackend(
-                base_url=settings.llm.ollama_base_url,
-                model_map=settings.llm.ollama_model_map,
-            )
+        self.backend: LLMBackend = self._build_primary_backend(env)
         self._fallback_backend = self._build_fallback_backend()
         self._retry_max_attempts = max(1, settings.llm.retry_max_attempts)
         self._retry_base_delay_seconds = max(0.0, settings.llm.retry_base_delay_seconds)
@@ -610,6 +611,45 @@ class LLMServiceClient:
             half_open_max_calls=settings.llm.circuit_breaker_half_open_max_calls,
         )
         logger.info(f"LLMServiceClient initialized with backend: {type(self.backend).__name__}")
+
+    def _build_primary_backend(self, env: str) -> LLMBackend:
+        backend_type = (settings.llm.primary_backend or "").strip().lower()
+        if backend_type in ("", "auto"):
+            backend_type = "vllm" if (env or "").strip().lower() == "production" else "zhipu"
+
+        if backend_type == "vllm":
+            return VLLMBackend(
+                base_url=settings.llm.vllm_base_url,
+                model=settings.llm.vllm_model,
+                adapter_map=settings.llm.vllm_adapter_map,
+            )
+        if backend_type == "ollama":
+            return OllamaBackend(
+                base_url=settings.llm.ollama_base_url,
+                model_map=settings.llm.ollama_model_map,
+            )
+        if backend_type == "zhipu":
+            return ZhipuBackend(
+                base_url=settings.llm.zhipu_base_url,
+                api_key=settings.llm.zhipu_api_key,
+                model=settings.llm.zhipu_model,
+            )
+
+        logger.warning(
+            "Unsupported primary backend: %s, fallback to env default",
+            backend_type,
+        )
+        if (env or "").strip().lower() == "production":
+            return VLLMBackend(
+                base_url=settings.llm.vllm_base_url,
+                model=settings.llm.vllm_model,
+                adapter_map=settings.llm.vllm_adapter_map,
+            )
+        return ZhipuBackend(
+            base_url=settings.llm.zhipu_base_url,
+            api_key=settings.llm.zhipu_api_key,
+            model=settings.llm.zhipu_model,
+        )
 
     def _build_fallback_backend(self) -> Optional[LLMBackend]:
         if not settings.llm.fallback_enabled:

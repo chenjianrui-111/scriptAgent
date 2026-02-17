@@ -16,6 +16,7 @@ from script_agent.agents.base import BaseAgent
 from script_agent.models.message import AgentMessage
 from script_agent.models.context import InfluencerProfile, StyleProfile
 from script_agent.services.llm_client import LLMServiceClient
+from script_agent.services.domain_data_repository import DomainDataRepository
 from script_agent.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -140,10 +141,11 @@ class ProfileAgent(BaseAgent):
     输出: InfluencerProfile
     """
 
-    def __init__(self):
+    def __init__(self, repository: Optional[DomainDataRepository] = None):
         super().__init__(name="profile")
         self.cache = ProfileCache()
         self.builder = ProfileBuilder()
+        self.repository = repository or DomainDataRepository()
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         slots = message.payload.get("slots", {})
@@ -158,12 +160,23 @@ class ProfileAgent(BaseAgent):
             lookup_key = target_id or target_name
             profile = await self.cache.get_profile(lookup_key)
             if not profile:
-                # 缓存未命中 → 实时构建
-                logger.info(f"Profile cache MISS, building for: {lookup_key}")
-                profile = await self.builder.build(
-                    target_id, target_name, category
+                profile = await self.repository.get_influencer_profile(
+                    influencer_id=target_id,
+                    name=target_name,
+                    category=category,
                 )
+                if profile:
+                    logger.info("Profile DB HIT: %s", lookup_key)
+                else:
+                    # 缓存未命中 + DB未命中 → 实时构建
+                    logger.info(f"Profile cache/DB MISS, building for: {lookup_key}")
+                    profile = await self.builder.build(
+                        target_id, target_name, category
+                    )
                 await self.cache.set_profile(lookup_key, profile)
+                if target_id and target_name and target_id != target_name:
+                    await self.cache.set_profile(target_id, profile)
+                    await self.cache.set_profile(target_name, profile)
         else:
             # 路径2: 无target → 品类通用画像
             profile = await self.builder.build_generic(category)

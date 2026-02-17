@@ -104,6 +104,7 @@ const PRESET_PRODUCTS = [
 
 const BOT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 const CLIENT_CONFIG_KEY = 'script_agent_frontend_config_v1';
+const AUTH_TOKEN_KEY = 'script_agent_auth_token';
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const REGEN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
@@ -131,6 +132,8 @@ const appState = {
   isStreaming: false,
   lastQuery: null,
   genStartTime: null,
+  authToken: '',
+  frontendConfig: null,
 };
 
 // ── DOM refs ──────────────────────────────────────────────
@@ -142,6 +145,7 @@ const userInput        = document.getElementById('userInput');
 const sendBtn          = document.getElementById('sendBtn');
 const newSessionBtn    = document.getElementById('newSessionBtn');
 const connToggleBtn    = document.getElementById('connToggleBtn');
+const authActionBtn    = document.getElementById('authActionBtn');
 const connPanel        = document.getElementById('connPanel');
 const apiBaseUrl       = document.getElementById('apiBaseUrl');
 const tenantIdInput    = document.getElementById('tenantIdInput');
@@ -202,6 +206,56 @@ function saveClientConfig() {
     bearerToken: (bearerTokenInput.value || '').trim(),
   };
   localStorage.setItem(CLIENT_CONFIG_KEY, JSON.stringify(cfg));
+}
+
+async function loadFrontendConfig() {
+  try {
+    var res = await fetch(buildApiUrl('/api/v1/frontend-config'));
+    if (!res.ok) throw new Error('config load failed');
+    appState.frontendConfig = await res.json();
+  } catch (_) {
+    appState.frontendConfig = {
+      env: 'unknown',
+      auth_required: false,
+      expose_connection_panel: true,
+      registration_enabled: true,
+    };
+  }
+}
+
+function applyFrontendConfig() {
+  var cfg = appState.frontendConfig || {};
+  var exposeConn = cfg.expose_connection_panel !== false;
+  if (connToggleBtn) connToggleBtn.classList.toggle('hidden', !exposeConn);
+  if (!exposeConn && connPanel) connPanel.classList.add('hidden');
+}
+
+function loadAuthToken() {
+  var token = localStorage.getItem(AUTH_TOKEN_KEY) || '';
+  if (!token && bearerTokenInput && bearerTokenInput.value) {
+    token = bearerTokenInput.value;
+  }
+  appState.authToken = token.trim();
+  return appState.authToken;
+}
+
+function clearAuthToken() {
+  appState.authToken = '';
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  try {
+    var cfg = JSON.parse(localStorage.getItem(CLIENT_CONFIG_KEY) || '{}');
+    delete cfg.bearerToken;
+    localStorage.setItem(CLIENT_CONFIG_KEY, JSON.stringify(cfg));
+  } catch (_) {
+    // ignore invalid cached config
+  }
+}
+
+function refreshAuthButton() {
+  if (!authActionBtn) return;
+  var hasToken = !!(appState.authToken && appState.authToken.trim());
+  authActionBtn.textContent = hasToken ? '退出登录' : '登录/注册';
+  authActionBtn.title = hasToken ? '清除登录状态' : '前往登录页面';
 }
 
 // ── Toast Notification System ─────────────────────────────
@@ -392,6 +446,7 @@ function copyScript(msgId) {
 }
 
 function regenerateScript() {
+  if (appState.isStreaming) return;
   if (!appState.lastQuery || !appState.sessionId) return;
   appState.flowState = FLOW.GENERATING;
   doStreamGeneration(appState.lastQuery);
@@ -449,17 +504,53 @@ function renderSessionList(sessions) {
 
     var dotClass = CATEGORY_DOT_MAP[s.category] || 'default';
     item.innerHTML =
-      '<span class="session-dot session-dot-' + dotClass + '"></span>' +
-      '<div class="session-info">' +
-        '<div class="session-name">' + escapeHtml(s.influencer_name || s.session_id) + '</div>' +
-        '<div class="session-meta">' + escapeHtml(s.category || '') + '</div>' +
-      '</div>';
+      '<div class="session-main">' +
+        '<span class="session-dot session-dot-' + dotClass + '"></span>' +
+        '<div class="session-info">' +
+          '<div class="session-name">' + escapeHtml(s.influencer_name || s.session_id) + '</div>' +
+          '<div class="session-meta">' + escapeHtml(s.category || '') + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<button class="session-delete-btn" title="删除会话" aria-label="删除会话">×</button>';
 
     item.addEventListener('click', (function(sid) {
       return function() { switchToSession(sid); };
     })(s.session_id));
 
+    var deleteBtn = item.querySelector('.session-delete-btn');
+    deleteBtn.addEventListener('click', (function(sid) {
+      return function(e) {
+        e.stopPropagation();
+        deleteSession(sid);
+      };
+    })(s.session_id));
+
     sessionList.appendChild(item);
+  }
+}
+
+async function deleteSession(sessionId) {
+  if (!sessionId) return;
+  var ok = window.confirm('确认删除该历史会话？删除后不可恢复。');
+  if (!ok) return;
+
+  try {
+    var res = await fetch(buildApiUrl('/api/v1/sessions/' + sessionId), {
+      method: 'DELETE',
+      headers: collectHeaders(),
+    });
+    if (!res.ok) {
+      var errText = await res.text();
+      throw new Error(errText || ('status ' + res.status));
+    }
+    showToast('历史会话已删除', 'success');
+    if (appState.sessionId === sessionId) {
+      init();
+      return;
+    }
+    await loadSessionList();
+  } catch (err) {
+    showToast('删除失败: ' + err.message, 'error');
   }
 }
 
@@ -668,6 +759,9 @@ function collectHeaders() {
   var role = (roleInput && roleInput.value ? roleInput.value : '').trim();
   var apiKey = (apiKeyInput && apiKeyInput.value ? apiKeyInput.value : '').trim();
   var bearerToken = (bearerTokenInput && bearerTokenInput.value ? bearerTokenInput.value : '').trim();
+  if (!bearerToken) {
+    bearerToken = (appState.authToken || '').trim();
+  }
 
   if (tenantId) headers['X-Tenant-Id'] = tenantId;
   if (role) headers['X-Role'] = role;
@@ -719,14 +813,24 @@ async function generateStream(sessionId, query, onToken, onDone, onError) {
         buffer = buffer.slice(idx + 2);
 
         var lines = raw.split('\n');
+        var tokenParts = [];
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i];
-          if (!line.startsWith('data: ')) continue;
-          var token = line.slice(6);
-          if (token === '[DONE]') { onDone(); return; }
-          if (token.startsWith('[ERROR]')) { onError(token); return; }
-          onToken(token);
+          if (line.startsWith('data:')) {
+            tokenParts.push(line.slice(5).replace(/^\s/, ''));
+            continue;
+          }
+          // 容错: 服务端若未给多行都加 data: 前缀，仍保留内容
+          if (tokenParts.length > 0 && line.length > 0) {
+            tokenParts[tokenParts.length - 1] += '\n' + line;
+          }
         }
+        if (tokenParts.length === 0) continue;
+
+        var token = tokenParts.join('\n');
+        if (token === '[DONE]') { onDone(); return; }
+        if (token.startsWith('[ERROR]')) { onError(token); return; }
+        onToken(token);
       }
     }
     onDone();
@@ -764,6 +868,7 @@ async function doStreamGeneration(query) {
   hideAllInputs();
   hideStats();
   setStatus('generating');
+  appState.isStreaming = true;
   appState.lastQuery = query;
   appState.genStartTime = Date.now();
 
@@ -970,15 +1075,29 @@ newSessionBtn.addEventListener('click', function() {
   init();
 });
 
-connToggleBtn.addEventListener('click', function() {
-  connPanel.classList.toggle('hidden');
-});
+if (connToggleBtn) {
+  connToggleBtn.addEventListener('click', function() {
+    connPanel.classList.toggle('hidden');
+  });
+}
 
 saveConnBtn.addEventListener('click', function() {
   saveClientConfig();
   showToast('连接配置已保存', 'success');
   connPanel.classList.add('hidden');
 });
+
+if (authActionBtn) {
+  authActionBtn.addEventListener('click', function() {
+    if (appState.authToken) {
+      clearAuthToken();
+      refreshAuthButton();
+      showToast('已退出登录', 'success');
+      return;
+    }
+    window.location.href = '/auth';
+  });
+}
 
 sidebarToggleBtn.addEventListener('click', function() {
   toggleSidebar();
@@ -1008,6 +1127,18 @@ document.addEventListener('keydown', function(e) {
 
 async function init() {
   loadClientConfig();
+  loadAuthToken();
+  refreshAuthButton();
+  await loadFrontendConfig();
+  applyFrontendConfig();
+
+  var cfg = appState.frontendConfig || {};
+  if (cfg.auth_required && !appState.authToken && !(apiKeyInput && apiKeyInput.value.trim())) {
+    showToast('生产环境请先登录后再使用', 'info', 2200);
+    setTimeout(function() { window.location.href = '/auth'; }, 500);
+    return;
+  }
+
   chatArea.innerHTML = '';
   hideAllInputs();
   hideStats();

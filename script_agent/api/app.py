@@ -14,6 +14,7 @@ API层 - FastAPI应用
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -24,7 +25,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from script_agent.agents.orchestrator import Orchestrator
-from script_agent.api.auth import AuthContext, get_auth_context
+from script_agent.api.auth import (
+    AuthContext,
+    authenticate_user,
+    get_auth_context,
+    issue_access_token,
+    register_user,
+)
 from script_agent.observability import metrics as obs
 from script_agent.services.checkpoint_store import WorkflowCheckpointManager
 from script_agent.services.core_rate_limiter import CoreRateLimiter
@@ -111,6 +118,27 @@ class GenerateResponse(BaseModel):
     error: str = ""
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=6, max_length=128)
+    tenant_id: str = Field(default="tenant_dev", min_length=1, max_length=64)
+    role: str = Field(default="user", min_length=1, max_length=16)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=6, max_length=128)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = 86400
+    username: str = ""
+    tenant_id: str = ""
+    role: str = "user"
+
+
 # ===================================================================
 # 租户隔离辅助
 # ===================================================================
@@ -133,6 +161,21 @@ def _estimate_token_cost(query: str, include_output_budget: bool = False) -> int
     if include_output_budget:
         return input_tokens + int(settings.llm.max_tokens * 0.6)
     return input_tokens
+
+
+def _format_sse_data(payload: str) -> str:
+    """
+    按 SSE 规范编码数据:
+      - 每一行都以 `data: ` 前缀输出
+      - 事件间使用空行分隔
+    """
+    text = str(payload or "")
+    if text == "":
+        return "data: \n\n"
+    lines = text.splitlines()
+    if not lines:
+        return "data: \n\n"
+    return "".join(f"data: {line}\n" for line in lines) + "\n"
 
 
 async def _enforce_core_limits(
@@ -169,6 +212,79 @@ async def frontend_home():
     if not WEB_DIR.exists():
         raise HTTPException(status_code=404, detail="frontend page not found")
     return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/auth", include_in_schema=False)
+async def frontend_auth():
+    """登录注册页面"""
+    if not WEB_DIR.exists():
+        raise HTTPException(status_code=404, detail="frontend page not found")
+    page = WEB_DIR / "auth.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="auth page not found")
+    return FileResponse(page)
+
+
+@app.get("/api/v1/frontend-config")
+async def frontend_config():
+    """前端运行时配置（是否暴露连接配置、是否需要登录）。"""
+    app_env = os.getenv("APP_ENV", settings.env or "development").lower()
+    expose_connection_panel = app_env != "production"
+    raw_override = os.getenv("FRONTEND_EXPOSE_CONNECTION_PANEL", "").strip().lower()
+    if raw_override in ("true", "false"):
+        expose_connection_panel = raw_override == "true"
+
+    registration_enabled = (
+        os.getenv("AUTH_REGISTRATION_ENABLED", "true").strip().lower() == "true"
+    )
+    return {
+        "env": app_env,
+        "auth_required": app_env != "development",
+        "expose_connection_panel": expose_connection_panel,
+        "registration_enabled": registration_enabled,
+    }
+
+
+@app.post("/api/v1/auth/register")
+async def auth_register(req: RegisterRequest):
+    """账号注册（本地 SQLite 用户库）。"""
+    registration_enabled = (
+        os.getenv("AUTH_REGISTRATION_ENABLED", "true").strip().lower() == "true"
+    )
+    if not registration_enabled:
+        raise HTTPException(status_code=403, detail="Registration disabled")
+    ok, msg = register_user(
+        username=req.username,
+        password=req.password,
+        tenant_id=req.tenant_id,
+        role=req.role,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"message": "注册成功"}
+
+
+@app.post("/api/v1/auth/login", response_model=LoginResponse)
+async def auth_login(req: LoginRequest):
+    """账号登录并签发 Bearer Token。"""
+    user = authenticate_user(req.username, req.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+    expires_in = int(os.getenv("AUTH_TOKEN_EXPIRES_SECONDS", "86400"))
+    token = issue_access_token(
+        username=user["username"],
+        tenant_id=user["tenant_id"],
+        role=user["role"],
+        expires_in_seconds=expires_in,
+    )
+    return LoginResponse(
+        access_token=token,
+        expires_in=expires_in,
+        username=user["username"],
+        tenant_id=user["tenant_id"],
+        role=user["role"],
+    )
 
 
 @app.post("/api/v1/sessions", response_model=CreateSessionResponse)
@@ -266,16 +382,16 @@ async def generate_script_stream(
                     checkpoint_loader=checkpoint_manager.latest_payload,
                     checkpoint_writer=checkpoint_manager.write,
                 ):
-                    yield f"data: {token}\n\n"
+                    yield _format_sse_data(token)
 
                 await session_manager.save(session)
-                yield "data: [DONE]\n\n"
+                yield _format_sse_data("[DONE]")
         except SessionLockTimeoutError:
             obs.record_lock_timeout("/api/v1/generate/stream")
-            yield "data: [ERROR] 会话正在处理中，请稍后重试\n\n"
+            yield _format_sse_data("[ERROR] 会话正在处理中，请稍后重试")
         except Exception as exc:
             logger.error("Stream generate failed: %s", exc, exc_info=True)
-            yield "data: [ERROR] 生成失败，请稍后重试\n\n"
+            yield _format_sse_data("[ERROR] 生成失败，请稍后重试")
 
     return StreamingResponse(
         event_generator(),
@@ -313,6 +429,17 @@ async def get_session(
         ],
         "generated_scripts_count": len(session.generated_scripts),
     }
+
+
+@app.delete("/api/v1/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """删除会话历史（租户隔离）。"""
+    await _load_session_with_tenant_check(session_id, auth)
+    await session_manager.delete(session_id)
+    return {"success": True, "session_id": session_id}
 
 
 @app.get("/api/v1/health")

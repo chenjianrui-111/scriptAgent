@@ -932,6 +932,38 @@ def test_full_flow_selling_points_stream_non_empty(monkeypatch):
     assert detail["turns"][0]["has_script"] is True
 
 
+def test_stream_endpoint_multiline_chunk_sse_format(monkeypatch):
+    """
+    SSE data lines should remain valid even when a chunk contains newline.
+    """
+    monkeypatch.setenv("APP_ENV", "development")
+    _disable_rate_limit(monkeypatch)
+
+    async def multiline_handle_stream(
+        query,
+        session,
+        trace_id=None,
+        checkpoint_saver=None,
+        checkpoint_loader=None,
+        checkpoint_writer=None,
+    ):
+        yield "第一行\n第二行"
+
+    monkeypatch.setattr(api_module.orchestrator, "handle_stream", multiline_handle_stream)
+    client = TestClient(api_module.app)
+    sid = _create_session(client, "美妆", "多行SSE")
+    stream_resp = client.post(
+        "/api/v1/generate/stream",
+        json={"session_id": sid, "query": "测试多行流式"},
+        headers=_headers(),
+    )
+    assert stream_resp.status_code == 200
+    body = stream_resp.text
+    assert "data: 第一行" in body
+    assert "data: 第二行" in body
+    assert "data: [DONE]" in body
+
+
 def test_full_flow_empty_stream_yields_error_message(monkeypatch):
     """
     When LLM returns completely empty content, frontend should receive

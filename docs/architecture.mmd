@@ -1,0 +1,158 @@
+%%{init: {'theme': 'dark', 'themeVariables': {'primaryColor': '#6C5CE7', 'primaryTextColor': '#fff', 'primaryBorderColor': '#a29bfe', 'lineColor': '#74b9ff', 'secondaryColor': '#00cec9', 'tertiaryColor': '#2d3436', 'background': '#0a0a1a', 'mainBkg': '#1e1e2e', 'nodeBorder': '#6C5CE7'}}}%%
+
+graph TB
+    subgraph CLIENT["<b>Frontend Layer</b> &nbsp; Vanilla JS + SSE"]
+        direction LR
+        UI["Chat UI<br/>双栏布局 + 深色主题"]
+        SIDEBAR["Session Sidebar<br/>历史会话列表"]
+        STEPPER["Flow Stepper<br/>场景→品类→类型→商品→生成"]
+        STREAM["SSE Stream Reader<br/>实时 Token 渲染"]
+    end
+
+    subgraph API["<b>API Gateway</b> &nbsp; FastAPI + Uvicorn ASGI"]
+        direction LR
+        AUTH["Auth Middleware<br/>JWT / API-Key<br/>多租户隔离"]
+        RATE["Core Rate Limiter<br/>QPS + Token 双维度"]
+        LOCK["Session Lock<br/>分布式并发控制"]
+        EP_SESSION["POST /sessions<br/>GET /sessions"]
+        EP_GEN["POST /generate"]
+        EP_STREAM["POST /generate/stream<br/>SSE"]
+        EP_HEALTH["GET /health<br/>GET /metrics"]
+    end
+
+    subgraph ORCH["<b>Orchestrator</b> &nbsp; LangGraph State Machine"]
+        direction TB
+        SM["Workflow State Machine"]
+
+        subgraph STATES["状态流转"]
+            direction LR
+            S1["INIT"] --> S2["INTENT<br/>RECOGNIZING"]
+            S2 --> S3["PROFILE<br/>FETCHING"]
+            S3 --> S4["PRODUCT<br/>FETCHING"]
+            S4 --> S5["SCRIPT<br/>GENERATING"]
+            S5 --> S6["QUALITY<br/>CHECKING"]
+            S6 -->|passed| S7["COMPLETED"]
+            S6 -->|retry| S5
+            S2 -->|low conf| S8["CLARIFYING"]
+        end
+
+        DEDUP["Request Dedup Cache"]
+        CKPT["Checkpoint Writer<br/>版本化 + 审计"]
+    end
+
+    subgraph AGENTS["<b>Multi-Agent System</b>"]
+        direction TB
+        INTENT["Intent Agent<br/>TF-IDF + LR + LLM Fallback<br/>Slot抽取 + 指代消解"]
+        PROFILE["Profile Agent<br/>达人画像 + 风格提取<br/>LRU Cache"]
+        PRODUCT["Product Agent<br/>商品信息 + 卖点补全"]
+        SCRIPT["Script Agent<br/>Prompt工程 + 流式生成<br/>clean_llm_response"]
+        QUALITY["Quality Agent<br/>敏感词AC自动机<br/>合规校验 + 风格一致性"]
+    end
+
+    subgraph SKILLS["<b>Skill Registry</b> &nbsp; 统一工具治理"]
+        direction LR
+        SK1["script_generation<br/>话术生成"]
+        SK2["script_modification<br/>话术修改"]
+        SK3["batch_generate<br/>批量生成"]
+        SEC["Security Preflight<br/>Schema校验 + Policy + Tripwire"]
+    end
+
+    subgraph LLM["<b>LLM Service Layer</b> &nbsp; 多后端统一接口"]
+        direction TB
+        CLIENT_LLM["LLMServiceClient<br/>分层Fallback + 幂等去重"]
+        CB["Circuit Breaker<br/>closed→open→half-open"]
+
+        subgraph BACKENDS["LLM Backends"]
+            direction LR
+            VLLM["vLLM<br/>生产环境<br/>LoRA动态切换"]
+            OLLAMA["Ollama<br/>开发环境<br/>Qwen 0.5b/7b"]
+            ZHIPU["Zhipu GLM<br/>兜底模型<br/>glm-4-flash"]
+        end
+    end
+
+    subgraph MEMORY["<b>Memory & Storage</b>"]
+        direction LR
+        REDIS[("Redis<br/>Session Store<br/>Checkpoint<br/>分布式锁<br/>限流计数")]
+        SQLITE[("SQLite<br/>Fallback Store")]
+        ES[("Elasticsearch<br/>向量检索<br/>长期记忆")]
+        MEM_LOCAL["Memory Store<br/>开发模式"]
+    end
+
+    subgraph CONTEXT["<b>Context Engine</b>"]
+        direction LR
+        COMPRESS["Session Compressor<br/>分级压缩"]
+        LTM["Long-Term Memory<br/>Dense+BM25 混合召回<br/>Rerank"]
+        EMBED["Embedding Provider<br/>Hash / SentenceTransformers"]
+    end
+
+    subgraph OBS["<b>Observability</b>"]
+        direction LR
+        PROM["Prometheus Metrics<br/>请求计数 / 延迟 / 质量"]
+        TRACE["Distributed Tracing<br/>trace_id 全链路"]
+    end
+
+    %% Client → API
+    UI -->|HTTP/SSE| EP_SESSION
+    UI -->|HTTP| EP_GEN
+    STREAM -->|SSE| EP_STREAM
+
+    %% API → Orchestrator
+    AUTH --> RATE --> LOCK
+    EP_GEN --> ORCH
+    EP_STREAM --> ORCH
+
+    %% Orchestrator → Agents
+    SM --> INTENT
+    SM --> PROFILE
+    SM --> PRODUCT
+    SM --> SCRIPT
+    SM --> QUALITY
+
+    %% Orchestrator → Skills
+    SM -->|skill routing| SKILLS
+    SK1 --> SCRIPT
+    SEC -->|preflight| SK1
+
+    %% Agents → LLM
+    SCRIPT --> CLIENT_LLM
+    INTENT -->|LLM fallback| CLIENT_LLM
+    CLIENT_LLM --> CB
+    CB --> VLLM
+    CB --> OLLAMA
+    CB -->|fallback| ZHIPU
+
+    %% Agents → Memory
+    PRODUCT --> LTM
+    LTM --> EMBED
+    EMBED --> ES
+    SCRIPT --> COMPRESS
+
+    %% Storage connections
+    CKPT --> REDIS
+    CKPT -.->|fallback| SQLITE
+    LOCK --> REDIS
+    RATE --> REDIS
+    LTM --> ES
+    EP_SESSION --> REDIS
+    EP_SESSION -.->|fallback| MEM_LOCAL
+
+    %% Observability
+    API --> OBS
+    ORCH --> OBS
+
+    %% Styling
+    classDef clientStyle fill:#6C5CE7,stroke:#a29bfe,color:#fff,stroke-width:2px
+    classDef apiStyle fill:#0984e3,stroke:#74b9ff,color:#fff,stroke-width:2px
+    classDef orchStyle fill:#00b894,stroke:#55efc4,color:#fff,stroke-width:2px
+    classDef agentStyle fill:#e17055,stroke:#fab1a0,color:#fff,stroke-width:2px
+    classDef llmStyle fill:#fdcb6e,stroke:#ffeaa7,color:#2d3436,stroke-width:2px
+    classDef storageStyle fill:#636e72,stroke:#b2bec3,color:#fff,stroke-width:2px
+    classDef obsStyle fill:#a29bfe,stroke:#6C5CE7,color:#fff,stroke-width:2px
+
+    class UI,SIDEBAR,STEPPER,STREAM clientStyle
+    class AUTH,RATE,LOCK,EP_SESSION,EP_GEN,EP_STREAM,EP_HEALTH apiStyle
+    class SM,DEDUP,CKPT orchStyle
+    class INTENT,PROFILE,PRODUCT,SCRIPT,QUALITY agentStyle
+    class CLIENT_LLM,CB,VLLM,OLLAMA,ZHIPU llmStyle
+    class REDIS,SQLITE,ES,MEM_LOCAL storageStyle
+    class PROM,TRACE obsStyle

@@ -38,11 +38,25 @@ def _default_ollama_model_map(env: str) -> Dict[str, str]:
     }
 
 
+def _default_primary_backend(env: str) -> str:
+    env_key = (env or "").strip().lower()
+    if env_key == "production":
+        return "vllm"
+    return "zhipu"
+
+
 @dataclass
 class LLMConfig:
     """LLM服务配置"""
     # 环境: development / testing / production
     env: str = os.getenv("APP_ENV", "development")
+
+    # 主后端: zhipu | vllm | ollama
+    # 默认: 开发/测试 zhipu, 生产 vllm
+    primary_backend: str = os.getenv(
+        "LLM_PRIMARY_BACKEND",
+        _default_primary_backend(os.getenv("APP_ENV", "development")),
+    )
 
     # vLLM (生产环境)
     vllm_base_url: str = os.getenv("VLLM_BASE_URL", "http://vllm-service:8000/v1")
@@ -237,6 +251,17 @@ class CacheConfig:
 
 
 @dataclass
+class DomainDataConfig:
+    """达人/商品基础数据源配置（SQLite）。"""
+
+    enabled: bool = os.getenv("DOMAIN_DATA_ENABLED", "true").lower() == "true"
+    sqlite_path: str = os.getenv("DOMAIN_DATA_DB_PATH", "domain_data.db")
+    auto_init_schema: bool = (
+        os.getenv("DOMAIN_DATA_AUTO_INIT_SCHEMA", "true").lower() == "true"
+    )
+
+
+@dataclass
 class OrchestrationConfig:
     """编排执行配置"""
     session_lock_timeout_seconds: float = float(
@@ -390,6 +415,7 @@ class AppConfig:
     context: ContextConfig = field(default_factory=ContextConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    domain_data: DomainDataConfig = field(default_factory=DomainDataConfig)
     orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     core_rate_limit: CoreRateLimitConfig = field(default_factory=CoreRateLimitConfig)

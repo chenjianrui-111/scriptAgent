@@ -1,4 +1,5 @@
 from script_agent.config.settings import (
+    _default_primary_backend,
     _default_ollama_model_map,
     _resolve_qwen_model_by_env,
 )
@@ -19,3 +20,11 @@ def test_default_ollama_model_map_uses_local_override(monkeypatch):
     mapping = _default_ollama_model_map("development")
     assert mapping["美妆"] == "qwen2.5:1.5b"
     assert mapping["通用"] == "qwen2.5:1.5b"
+
+
+def test_default_primary_backend_development():
+    assert _default_primary_backend("development") == "zhipu"
+
+
+def test_default_primary_backend_production():
+    assert _default_primary_backend("production") == "vllm"
