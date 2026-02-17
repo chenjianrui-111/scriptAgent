@@ -9,6 +9,7 @@
 
 import uuid
 import logging
+import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from script_agent.agents.base import BaseAgent
@@ -91,6 +92,10 @@ class PromptBuilder:
         scenario = intent_slots.get("sub_scenario") or intent_slots.get("scenario", "")
         parts.append(self._build_scenario_prompt(scenario, intent_slots))
 
+        # 3.1 会话任务摘要（提升多轮连贯性）
+        if session:
+            parts.append(self._build_context_summary(intent_slots, session, product))
+
         # 4. 活动信息 (如有)
         event = intent_slots.get("event")
         if event:
@@ -109,6 +114,12 @@ class PromptBuilder:
             parts.append(self._build_compressed_history(compressed_context))
         elif session and session.turns:
             parts.append(self._build_history_context(session))
+
+        # 5.1 续写约束（防止多轮重复）
+        if session and session.turns:
+            constraints = self._build_continuation_constraints(intent_slots, session)
+            if constraints:
+                parts.append(constraints)
 
         # 6. 用户额外要求
         requirements = intent_slots.get("requirements", "")
@@ -155,6 +166,40 @@ class PromptBuilder:
             template = f"\n【品类】{category}\n" + template
         return template
 
+    def _build_context_summary(
+        self,
+        intent_slots: Dict[str, Any],
+        session: SessionContext,
+        product: Optional[ProductProfile],
+    ) -> str:
+        if not session.turns:
+            return ""
+        lines = ["\n【会话目标摘要】"]
+        scenario = (
+            intent_slots.get("sub_scenario")
+            or intent_slots.get("scenario")
+            or "话术生成"
+        )
+        lines.append(f"- 当前任务: {scenario}")
+        if product and product.name:
+            lines.append(f"- 当前商品: {product.name}")
+
+        recent_users = [t.user_message.strip() for t in session.turns[-3:] if t.user_message.strip()]
+        if recent_users:
+            lines.append("- 最近用户诉求:")
+            for q in recent_users[-2:]:
+                lines.append(f"  - {q[:48]}")
+
+        last_script = ""
+        for turn in reversed(session.turns):
+            if turn.generated_script and turn.generated_script.strip():
+                last_script = turn.generated_script.strip()
+                break
+        if last_script:
+            lines.append(f"- 上版话术核心: {last_script[:90]}")
+        lines.append("- 本轮要求: 语气保持一致，但信息表达要有新增，不要整段复述")
+        return "\n".join(lines)
+
     def _build_product_prompt(self, product: ProductProfile) -> str:
         lines = ["\n【商品信息】"]
         lines.append(f"- 商品名: {product.name}")
@@ -196,8 +241,8 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _build_history_context(self, session: SessionContext) -> str:
-        """构建历史对话摘要 (最近2轮)"""
-        recent = session.turns[-2:]
+        """构建历史对话摘要 (最近3轮)"""
+        recent = session.turns[-3:]
         if not recent:
             return ""
         lines = ["\n【对话上下文】"]
@@ -205,6 +250,34 @@ class PromptBuilder:
             lines.append(f"用户: {t.user_message[:100]}")
             if t.generated_script:
                 lines.append(f"上一版话术摘要: {t.generated_script[:100]}...")
+        return "\n".join(lines)
+
+    def _build_continuation_constraints(
+        self,
+        slots: Dict[str, Any],
+        session: SessionContext,
+    ) -> str:
+        requirements = str(slots.get("requirements", ""))
+        continuation = bool(slots.get("_continuation")) or any(
+            kw in requirements for kw in ("继续", "再来", "补充", "续写", "换一个")
+        )
+        if not continuation:
+            return (
+                "\n【重复抑制】\n"
+                "- 同一句话不要重复出现\n"
+                "- 禁止输出提示词片段、字段清单、占位符（如 --- / ...）"
+            )
+        prev_head = ""
+        for t in reversed(session.turns):
+            if t.generated_script and t.generated_script.strip():
+                prev_head = t.generated_script.strip()[:24]
+                break
+        lines = ["\n【续写约束】"]
+        lines.append("- 当前为续写任务：保持同一达人风格，但必须输出新增信息")
+        if prev_head:
+            lines.append(f"- 不要复用上版开头（例如“{prev_head}”）")
+        lines.append("- 新增至少2个信息点（卖点/场景/互动/转化引导）")
+        lines.append("- 不输出字段清单、提示语、占位符（如 --- / ...）")
         return "\n".join(lines)
 
     def _build_compressed_history(self, context: CompressedContext) -> str:
@@ -242,6 +315,10 @@ class ScriptGenerationAgent(BaseAgent):
         self.context_compressor = SessionContextCompressor()
         self.min_chars = max(1, settings.llm.script_min_chars)
         self.primary_attempts = max(1, settings.llm.script_primary_attempts)
+        self._separator_only_re = re.compile(r"^[-—_=*`.\s]{2,}$")
+        self._meta_line_re = re.compile(
+            r"^\s*-\s*(达人|语气风格|常用口头禅|正式度|目标受众|商品名|品牌|价格带|核心特征|主卖点|合规提醒)\s*[:：]"
+        )
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         intent_slots = message.payload.get("slots", {})
@@ -270,6 +347,8 @@ class ScriptGenerationAgent(BaseAgent):
             prompt=prompt,
             category=category,
             request_id=message.trace_id or message.message_id,
+            session=session,
+            slots=intent_slots,
         )
 
         # 3. 敏感词检测
@@ -331,6 +410,8 @@ class ScriptGenerationAgent(BaseAgent):
             category=category,
             request_id=f"{session.session_id}:stream",
             stream_mode=True,
+            session=session,
+            slots=intent_slots,
         )
         if not content or not content.strip():
             logger.warning("generate_stream received empty content from LLM")
@@ -381,20 +462,46 @@ class ScriptGenerationAgent(BaseAgent):
         request_id: str,
         *,
         stream_mode: bool = False,
+        session: Optional[SessionContext] = None,
+        slots: Optional[Dict[str, Any]] = None,
     ) -> str:
         last_error: Optional[Exception] = None
+        last_reason = ""
+        last_text = ""
+        best_soft_candidate = ""
         for idx in range(1, self.primary_attempts + 1):
             try:
+                attempt_prompt = self._build_retry_prompt(
+                    base_prompt=prompt,
+                    attempt=idx,
+                    reason=last_reason,
+                    previous_text=last_text,
+                )
                 text = (
                     await self._generate_once(
-                        prompt,
+                        attempt_prompt,
                         category,
                         f"{request_id}:primary:{idx}",
                         prefer_fallback=False,
                         stream_mode=stream_mode,
                     )
                 ).strip()
+                text = self._post_process_output(text)
+                text = self._reduce_leading_overlap(text, session, slots or {})
+                issue = self._validate_generation_output(
+                    text=text,
+                    session=session,
+                    slots=slots or {},
+                )
+                if issue:
+                    if self._is_soft_issue(issue) and len(text) >= self.min_chars:
+                        best_soft_candidate = text
+                    last_reason = issue
+                    last_text = text
+                    raise RuntimeError(issue)
                 if len(text) < self.min_chars:
+                    last_reason = "content_too_short"
+                    last_text = text
                     raise RuntimeError(
                         f"generated content too short: {len(text)} < {self.min_chars}"
                     )
@@ -411,13 +518,29 @@ class ScriptGenerationAgent(BaseAgent):
         try:
             fallback_text = (
                 await self._generate_once(
-                    prompt,
+                    self._build_retry_prompt(
+                        base_prompt=prompt,
+                        attempt=self.primary_attempts + 1,
+                        reason=last_reason or "primary_failed",
+                        previous_text=last_text,
+                    ),
                     category,
                     f"{request_id}:fallback",
                     prefer_fallback=True,
                     stream_mode=stream_mode,
                 )
             ).strip()
+            fallback_text = self._post_process_output(fallback_text)
+            fallback_text = self._reduce_leading_overlap(
+                fallback_text, session, slots or {}
+            )
+            fallback_issue = self._validate_generation_output(
+                text=fallback_text,
+                session=session,
+                slots=slots or {},
+            )
+            if fallback_issue:
+                raise RuntimeError(f"fallback content invalid: {fallback_issue}")
             if len(fallback_text) < self.min_chars:
                 raise RuntimeError(
                     f"fallback generated content too short: "
@@ -427,6 +550,12 @@ class ScriptGenerationAgent(BaseAgent):
         except Exception as exc:
             if last_error is None:
                 last_error = exc
+            if best_soft_candidate:
+                logger.warning(
+                    "script generation fallback failed, return best soft candidate: reason=%s",
+                    last_reason or "unknown",
+                )
+                return best_soft_candidate
             raise RuntimeError(
                 "script generation failed after retries and fallback"
             ) from last_error
@@ -445,3 +574,193 @@ class ScriptGenerationAgent(BaseAgent):
         except Exception as exc:
             logger.warning("session memory compression failed: %s", exc)
             return None
+
+    def _build_retry_prompt(
+        self,
+        *,
+        base_prompt: str,
+        attempt: int,
+        reason: str,
+        previous_text: str,
+    ) -> str:
+        if attempt <= 1:
+            return base_prompt
+        lines = [base_prompt, "\n【重试修正要求】"]
+        if reason == "prompt_echo_detected":
+            lines.append("- 禁止输出字段清单或配置项（如“商品名/主卖点/合规提醒”）")
+        elif reason == "high_overlap_with_recent_script":
+            lines.append("- 与上一版重复过高，请改写为全新表述，不要复用开头")
+        elif reason == "content_too_short":
+            lines.append("- 内容长度不足，请补足完整口播段落并加入互动与转化信息")
+        elif reason == "repetition_detected":
+            lines.append("- 句子重复明显，请删除重复句并补充新信息点")
+        else:
+            lines.append("- 请直接输出可用话术正文，不要输出提示语或元信息")
+        if previous_text:
+            lines.append(f"- 上次无效输出片段（禁止复用）：{previous_text[:70]}")
+        return "\n".join(lines)
+
+    def _post_process_output(self, text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return ""
+        lines = []
+        for line in text.splitlines():
+            s = line.strip()
+            if self._separator_only_re.match(s):
+                continue
+            if self._meta_line_re.match(s):
+                continue
+            lines.append(line)
+        cleaned = "\n".join(lines).strip()
+        return self._dedupe_sentences(cleaned)
+
+    def _dedupe_sentences(self, text: str) -> str:
+        parts = re.findall(r"[^。！？!?；;\n]+[。！？!?；;\n]?", text)
+        if not parts:
+            return text
+        seen = set()
+        result = []
+        for part in parts:
+            normalized = self._normalize_text(part)
+            if len(normalized) >= 6 and normalized in seen:
+                continue
+            if len(normalized) >= 6:
+                seen.add(normalized)
+            result.append(part)
+        return "".join(result).strip()
+
+    def _validate_generation_output(
+        self,
+        *,
+        text: str,
+        session: Optional[SessionContext],
+        slots: Dict[str, Any],
+    ) -> Optional[str]:
+        if not text:
+            return "content_too_short"
+        if self._is_prompt_echo(text):
+            return "prompt_echo_detected"
+        if self._has_heavy_repetition(text):
+            return "repetition_detected"
+        if self._is_high_overlap_with_recent(text, session, slots):
+            return "high_overlap_with_recent_script"
+        return None
+
+    def _is_prompt_echo(self, text: str) -> bool:
+        marker_hits = 0
+        markers = ("商品名", "主卖点", "核心特征", "合规提醒", "语气风格", "达人")
+        for m in markers:
+            marker_hits += text.count(m)
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        bullet_like = sum(1 for ln in lines[:4] if ln.startswith("-"))
+        return marker_hits >= 3 and bullet_like >= 2
+
+    def _has_heavy_repetition(self, text: str) -> bool:
+        parts = [p for p in re.findall(r"[^。！？!?；;\n]+", text) if p.strip()]
+        if len(parts) < 3:
+            return False
+        seen = {}
+        for part in parts:
+            key = self._normalize_text(part)
+            if len(key) < 8:
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] >= 2:
+                return True
+        return False
+
+    def _is_high_overlap_with_recent(
+        self,
+        text: str,
+        session: Optional[SessionContext],
+        slots: Dict[str, Any],
+    ) -> bool:
+        if not session or not session.turns:
+            return False
+        recent_scripts = []
+        for turn in reversed(session.turns):
+            if turn.generated_script and turn.generated_script.strip():
+                recent_scripts.append(turn.generated_script.strip())
+            if len(recent_scripts) >= 2:
+                break
+        if not recent_scripts:
+            return False
+        requirements = str(slots.get("requirements", ""))
+        is_continuation = bool(slots.get("_continuation")) or any(
+            kw in requirements for kw in ("继续", "再来", "补充", "续写", "换一个")
+        )
+        if is_continuation:
+            current_prefix = self._leading_sentence(text)
+            if current_prefix:
+                norm_current = self._normalize_text(current_prefix)
+                for prev in recent_scripts:
+                    norm_prev = self._normalize_text(self._leading_sentence(prev))
+                    if norm_current and norm_prev and norm_current == norm_prev:
+                        return True
+        threshold = 0.68 if is_continuation else 0.82
+        return any(
+            self._char_ngram_jaccard(text, prev) >= threshold
+            for prev in recent_scripts
+        )
+
+    def _char_ngram_jaccard(self, a: str, b: str, n: int = 4) -> float:
+        na = self._char_ngrams(self._normalize_text(a), n)
+        nb = self._char_ngrams(self._normalize_text(b), n)
+        if not na or not nb:
+            return 0.0
+        return len(na & nb) / len(na | nb)
+
+    def _char_ngrams(self, text: str, n: int) -> set:
+        if not text:
+            return set()
+        if len(text) <= n:
+            return {text}
+        return {text[i:i + n] for i in range(len(text) - n + 1)}
+
+    def _normalize_text(self, text: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text or "").lower()
+
+    def _is_soft_issue(self, issue: str) -> bool:
+        return issue in {"high_overlap_with_recent_script", "repetition_detected"}
+
+    def _reduce_leading_overlap(
+        self,
+        text: str,
+        session: Optional[SessionContext],
+        slots: Dict[str, Any],
+    ) -> str:
+        if not text or not session or not session.turns:
+            return text
+        requirements = str(slots.get("requirements", ""))
+        is_continuation = bool(slots.get("_continuation")) or any(
+            kw in requirements for kw in ("继续", "再来", "补充", "续写", "换一个")
+        )
+        if not is_continuation:
+            return text
+        prev_script = ""
+        for turn in reversed(session.turns):
+            if turn.generated_script and turn.generated_script.strip():
+                prev_script = turn.generated_script.strip()
+                break
+        if not prev_script:
+            return text
+        current_head = self._leading_sentence(text)
+        prev_head = self._leading_sentence(prev_script)
+        if not current_head or not prev_head:
+            return text
+        if self._normalize_text(current_head) != self._normalize_text(prev_head):
+            return text
+        parts = re.findall(r"[^。！？!?；;\n]+[。！？!?；;\n]?", text)
+        if len(parts) <= 1:
+            return text
+        trimmed = "".join(parts[1:]).strip()
+        if len(trimmed) >= self.min_chars:
+            return trimmed
+        return text
+
+    def _leading_sentence(self, text: str) -> str:
+        parts = re.findall(r"[^。！？!?；;\n]+[。！？!?；;\n]?", text or "")
+        if not parts:
+            return ""
+        return parts[0].strip()

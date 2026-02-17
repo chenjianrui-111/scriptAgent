@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-02-17
+
+### Added
+
+- 新增多轮连贯性优化能力（`script_agent/agents/script_agent.py`）：
+  - 会话目标摘要注入（任务/商品/最近诉求/上版核心）
+  - 续写约束注入（禁止复用上版开头、要求新增信息点）
+  - 重试修正提示注入（按失败原因动态补充修正指令）
+- 新增生成后处理与校验能力：
+  - 重复句去重
+  - 字段清单/提示词泄漏抑制
+  - 与历史话术高重合检测（含续写场景首句复用检测）
+- 新增回归测试（`tests/test_agents.py`）：
+  - `test_prompt_builder_injects_context_summary_and_continuation_constraints`
+  - `test_script_generation_agent_retries_on_high_overlap`
+  - `test_script_generation_agent_trims_reused_leading_sentence`
+
+### Changed
+
+- `PromptBuilder` 历史上下文窗口从最近2轮扩展为最近3轮，提升多轮信息覆盖度。
+- `ScriptGenerationAgent._generate_with_retry` 增强为“生成后处理 -> 连贯性校验 -> 按原因重试 -> 兜底”链路。
+- 在重试和兜底均失败但已有可用候选时，返回最佳软候选，避免直接空结果。
+
+### Fixed
+
+- 修复续写场景中容易复用上一版开头、导致“看起来不连贯/像重复生成”的问题。
+- 修复部分输出包含字段化片段（如商品元信息清单）混入正文的问题。
+
 ## [1.3.0] - 2026-02-17
 
 ### Added

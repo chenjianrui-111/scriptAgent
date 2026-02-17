@@ -498,6 +498,89 @@ class TestOrchestrator:
         assert all(w["trace_id"] == "trace-stream-1" for w in writes)
         assert "PRODUCT_FETCHING" in writes[-1]["payload"].get("state_history", [])
 
+    def test_stream_short_output_not_leaked_to_client(self):
+        from script_agent.agents.orchestrator import Orchestrator
+        from script_agent.models.context import (
+            InfluencerProfile,
+            ProductProfile,
+            SessionContext,
+        )
+        from script_agent.models.message import IntentResult
+        from script_agent.config.settings import settings
+
+        class DummyIntentAgent:
+            async def __call__(self, message):
+                return message.create_response(
+                    payload={
+                        "intent_result": IntentResult(
+                            intent="stream_generation",
+                            confidence=0.95,
+                            slots={"category": "美妆", "scenario": "直播带货"},
+                        )
+                    },
+                    source="intent",
+                )
+
+        class DummyProfileAgent:
+            async def __call__(self, message):
+                return message.create_response(
+                    payload={
+                        "profile": InfluencerProfile(
+                            influencer_id="inf-short",
+                            name="短内容测试",
+                            category="美妆",
+                        )
+                    },
+                    source="profile",
+                )
+
+        class DummyProductAgent:
+            async def fetch(self, slots, profile, session, query=""):
+                return ProductProfile(name="玻尿酸精华液", category="美妆"), []
+
+        class DummyScriptAgent:
+            async def generate_stream(
+                self,
+                intent_slots,
+                profile,
+                session,
+                product=None,
+                memory_hits=None,
+            ):
+                yield "太短"
+
+        class DummyMemoryRetriever:
+            async def remember_script(self, **kwargs):
+                return None
+
+        orch = Orchestrator()
+        orch.intent_agent = DummyIntentAgent()
+        orch.profile_agent = DummyProfileAgent()
+        orch.product_agent = DummyProductAgent()
+        orch.script_agent = DummyScriptAgent()
+        orch.memory_retriever = DummyMemoryRetriever()
+
+        session = SessionContext(session_id="s-stream-short", tenant_id="t1", category="美妆")
+
+        async def _run():
+            old_min = settings.llm.script_min_chars
+            settings.llm.script_min_chars = 40
+            try:
+                chunks = []
+                async for token in orch.handle_stream(
+                    query="生成一段开场话术",
+                    session=session,
+                    trace_id="trace-stream-short",
+                ):
+                    chunks.append(token)
+                return "".join(chunks)
+            finally:
+                settings.llm.script_min_chars = old_min
+
+        body = asyncio.run(_run())
+        assert "太短" not in body
+        assert "生成内容过短" in body
+
 
 class TestEnterpriseFeatures:
     """企业级能力测试: 恢复机制 + 并发管理"""
@@ -937,6 +1020,133 @@ class TestEnterpriseFeatures:
         finally:
             settings.context.total_token_budget = old_total
             settings.context.longterm_token_budget = old_longterm
+
+    def test_prompt_builder_injects_context_summary_and_continuation_constraints(self):
+        from script_agent.agents.script_agent import PromptBuilder
+        from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
+
+        builder = PromptBuilder()
+        session = SessionContext(session_id="s-continuation")
+        session.add_turn(
+            user_message="先来一段开场话术",
+            assistant_message="亲爱的姐妹们，欢迎来到直播间！今天先讲成分亮点。",
+            generated_script="亲爱的姐妹们，欢迎来到直播间！今天先讲成分亮点。",
+        )
+        slots = {
+            "category": "美妆",
+            "scenario": "直播带货",
+            "sub_scenario": "卖点介绍",
+            "_continuation": True,
+        }
+        prompt = builder.build(
+            slots,
+            InfluencerProfile(category="美妆"),
+            session=session,
+            product=ProductProfile(name="玻尿酸精华液", category="美妆"),
+        )
+        assert "【会话目标摘要】" in prompt
+        assert "【续写约束】" in prompt
+        assert "不要复用上版开头" in prompt
+
+    def test_script_generation_agent_retries_on_high_overlap(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+        from script_agent.config.settings import settings
+        from script_agent.models.context import InfluencerProfile, ProductProfile, SessionContext
+        from script_agent.models.message import AgentMessage
+
+        old_min = settings.llm.script_min_chars
+        old_attempts = settings.llm.script_primary_attempts
+
+        class OverlapRetryLLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate_sync(
+                self,
+                prompt: str,
+                category: str = "通用",
+                max_tokens: int = 1024,
+                **kwargs,
+            ) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        "亲爱的姐妹们，欢迎来到直播间！今天这款玻尿酸精华液成分温和，"
+                        "上脸服帖，妆效自然，真的特别适合通勤和约会。"
+                    )
+                return (
+                    "宝子们我们继续上强度，这一段重点讲下单理由：今晚有限时福利，"
+                    "现在拍下有赠品，敏感肌也能安心用，记得先点赞再去购物车锁单。"
+                )
+
+            async def generate(self, prompt: str, category: str = "通用", stream: bool = True, **kwargs):
+                yield ""
+
+        async def _test():
+            settings.llm.script_min_chars = 40
+            settings.llm.script_primary_attempts = 2
+            agent = ScriptGenerationAgent()
+            fake_llm = OverlapRetryLLM()
+            agent.llm = fake_llm
+
+            session = SessionContext(session_id="s-overlap")
+            session.add_turn(
+                user_message="先来一段开场话术",
+                assistant_message="亲爱的姐妹们，欢迎来到直播间！今天这款玻尿酸精华液成分温和，上脸服帖，妆效自然，真的特别适合通勤和约会。",
+                generated_script="亲爱的姐妹们，欢迎来到直播间！今天这款玻尿酸精华液成分温和，上脸服帖，妆效自然，真的特别适合通勤和约会。",
+            )
+            msg = AgentMessage(
+                trace_id="trace-overlap-retry",
+                payload={
+                    "slots": {
+                        "category": "美妆",
+                        "scenario": "直播带货",
+                        "_continuation": True,
+                    },
+                    "profile": InfluencerProfile(category="美妆"),
+                    "product": ProductProfile(name="玻尿酸精华液", category="美妆"),
+                    "memory_hits": [],
+                    "session": session,
+                },
+            )
+            resp = await agent(msg)
+            content = resp.payload["script"].content
+            assert len(content) >= 40
+            assert "限时福利" in content
+            assert fake_llm.calls == 2
+
+        try:
+            asyncio.run(_test())
+        finally:
+            settings.llm.script_min_chars = old_min
+            settings.llm.script_primary_attempts = old_attempts
+
+    def test_script_generation_agent_trims_reused_leading_sentence(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+        from script_agent.models.context import SessionContext
+
+        agent = ScriptGenerationAgent()
+        session = SessionContext(session_id="s-trim-head")
+        prev = (
+            "亲爱的姐妹们，欢迎来到直播间，今天先看玻尿酸精华液。"
+            "它主打成分温和、上脸服帖，日常妆前妆后都很好用。"
+        )
+        session.add_turn(
+            user_message="先来一段",
+            assistant_message=prev,
+            generated_script=prev,
+        )
+        current = (
+            "亲爱的姐妹们，欢迎来到直播间，今天先看玻尿酸精华液。"
+            "这一段我们重点补充限时福利：现在下单送旅行装，"
+            "敏感肌也可用，记得先点赞再进购物车锁单。"
+        )
+        trimmed = agent._reduce_leading_overlap(
+            current,
+            session,
+            {"_continuation": True},
+        )
+        assert trimmed.startswith("这一段我们重点补充限时福利")
 
     def test_script_generation_skill_fails_on_script_agent_error(self):
         from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
@@ -1393,6 +1603,14 @@ class TestCleanLLMResponse:
         assert "- 达人:" not in result
         assert "- 商品名" not in result
         assert "希望这些话术" not in result
+
+    def test_strip_leading_separator_lines(self):
+        from script_agent.services.llm_client import clean_llm_response
+
+        text = "---\n---\n家人们晚上好，今天给大家带来玻尿酸精华液的核心卖点讲解。"
+        result = clean_llm_response(text)
+        assert not result.startswith("---")
+        assert "玻尿酸精华液" in result
 
 
 # =======================================================================
