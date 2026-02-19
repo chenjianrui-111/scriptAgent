@@ -1638,6 +1638,143 @@ class TestEnterpriseFeatures:
 
         asyncio.run(_test())
 
+    def test_script_generation_skill_degrades_when_retry_generation_fails(self):
+        from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
+        from script_agent.skills.base import SkillContext
+        from script_agent.models.context import InfluencerProfile, SessionContext
+        from script_agent.models.message import (
+            AgentMessage,
+            GeneratedScript,
+            IntentResult,
+            QualityResult,
+        )
+
+        class FirstOkThenErrorScriptAgent:
+            def __init__(self):
+                self.calls = 0
+
+            async def __call__(self, message: AgentMessage):
+                self.calls += 1
+                if self.calls == 1:
+                    return message.create_response(
+                        payload={
+                            "script": GeneratedScript(
+                                content=(
+                                    "这是一段可用的第一版文案，长度超过四十个字符，"
+                                    "适合直播带货直接使用，同时包含卖点和互动引导。"
+                                )
+                            )
+                        },
+                        source="script_generation",
+                    )
+                return message.create_error(
+                    error_code="script_generation_error",
+                    error_msg="script generation failed after retries and fallback",
+                )
+
+        class AlwaysFailQualityAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_response(
+                    payload={
+                        "quality_result": QualityResult(
+                            passed=False,
+                            overall_score=0.61,
+                            suggestions=["结尾补一句行动号召"],
+                        )
+                    },
+                    source="quality_check",
+                )
+
+        async def _test():
+            skill = ScriptGenerationSkill()
+            skill._script_agent = FirstOkThenErrorScriptAgent()
+            skill._quality_agent = AlwaysFailQualityAgent()
+            ctx = SkillContext(
+                intent=IntentResult(
+                    intent="script_generation",
+                    confidence=0.9,
+                    slots={"category": "食品", "scenario": "直播带货"},
+                ),
+                profile=InfluencerProfile(category="食品"),
+                session=SessionContext(session_id="s-skill-degrade"),
+                trace_id="trace-skill-degrade",
+            )
+            result = await skill.execute(ctx)
+            assert result.success is True
+            assert result.data.get("degraded") is True
+            assert "可用文案" in result.message
+            assert result.script is not None
+            assert len(result.script.content.strip()) >= 40
+
+        asyncio.run(_test())
+
+    def test_script_generation_skill_returns_degraded_success_when_quality_still_fails(self):
+        from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
+        from script_agent.skills.base import SkillContext
+        from script_agent.models.context import InfluencerProfile, SessionContext
+        from script_agent.models.message import (
+            AgentMessage,
+            GeneratedScript,
+            IntentResult,
+            QualityResult,
+        )
+        from script_agent.config.settings import settings
+
+        class StableScriptAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_response(
+                    payload={
+                        "script": GeneratedScript(
+                            content=(
+                                "这是一段稳定输出的可用文案，信息完整并且长度足够，"
+                                "能够用于直播口播并承接下单转化动作。"
+                            )
+                        )
+                    },
+                    source="script_generation",
+                )
+
+        class AlwaysFailQualityAgent:
+            async def __call__(self, message: AgentMessage):
+                return message.create_response(
+                    payload={
+                        "quality_result": QualityResult(
+                            passed=False,
+                            overall_score=0.6,
+                            suggestions=["减少夸张表达"],
+                        )
+                    },
+                    source="quality_check",
+                )
+
+        async def _test():
+            old_retries = settings.quality.max_retries
+            settings.quality.max_retries = 0
+            try:
+                skill = ScriptGenerationSkill()
+                skill._script_agent = StableScriptAgent()
+                skill._quality_agent = AlwaysFailQualityAgent()
+                ctx = SkillContext(
+                    intent=IntentResult(
+                        intent="script_generation",
+                        confidence=0.9,
+                        slots={"category": "美妆", "scenario": "直播带货"},
+                    ),
+                    profile=InfluencerProfile(category="美妆"),
+                    session=SessionContext(session_id="s-skill-quality-fail"),
+                    trace_id="trace-skill-quality-fail",
+                )
+                result = await skill.execute(ctx)
+                assert result.success is True
+                assert result.data.get("degraded") is True
+                assert "可用文案" in result.message
+                assert result.quality_result is not None
+                assert result.quality_result.passed is False
+            finally:
+                settings.quality.max_retries = old_retries
+
+        asyncio.run(_test())
+
     def test_script_generation_agent_retries_then_fallback(self):
         from script_agent.agents.script_agent import ScriptGenerationAgent
         from script_agent.config.settings import settings

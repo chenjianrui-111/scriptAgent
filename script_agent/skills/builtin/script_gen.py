@@ -65,6 +65,21 @@ class ScriptGenerationSkill(BaseSkill):
             return 0.6
         return 0.0
 
+    def _degraded_success(
+        self,
+        *,
+        script: GeneratedScript,
+        quality_result,
+        message: str,
+    ) -> SkillResult:
+        return SkillResult(
+            success=True,
+            script=script,
+            quality_result=quality_result,
+            message=message,
+            data={"degraded": True},
+        )
+
     async def execute(self, context: SkillContext) -> SkillResult:
         slots = context.intent.slots
         profile = context.profile
@@ -116,6 +131,15 @@ class ScriptGenerationSkill(BaseSkill):
             )
             quality_resp = await self._quality_agent(quality_msg)
             if quality_resp.message_type == MessageType.ERROR:
+                if script.content.strip():
+                    return self._degraded_success(
+                        script=script,
+                        quality_result=quality_result,
+                        message=(
+                            quality_resp.payload.get("error_message", "质量检查失败")
+                            + "，已返回可用文案"
+                        ),
+                    )
                 return SkillResult(
                     success=False,
                     script=script,
@@ -133,6 +157,15 @@ class ScriptGenerationSkill(BaseSkill):
                 )
                 script_resp = await self._script_agent(script_msg)
                 if script_resp.message_type == MessageType.ERROR:
+                    if script.content.strip():
+                        return self._degraded_success(
+                            script=script,
+                            quality_result=quality_result,
+                            message=(
+                                script_resp.payload.get("error_message", "话术生成失败")
+                                + "，已回退到上一版可用文案"
+                            ),
+                        )
                     return SkillResult(
                         success=False,
                         script=script,
@@ -140,12 +173,24 @@ class ScriptGenerationSkill(BaseSkill):
                     )
                 script = script_resp.payload.get("script", script)
                 if len(script.content.strip()) < min_chars:
+                    if script.content.strip():
+                        return self._degraded_success(
+                            script=script,
+                            quality_result=quality_result,
+                            message=f"重试后结果不足{min_chars}字，已返回上一版可用文案",
+                        )
                     return SkillResult(
                         success=False,
                         script=script,
                         message=f"重试后结果仍不足{min_chars}字",
                     )
 
+        if quality_result and not quality_result.passed and script.content.strip():
+            return self._degraded_success(
+                script=script,
+                quality_result=quality_result,
+                message="质量校验未完全通过，已返回可用文案",
+            )
         return SkillResult(
             success=quality_result.passed if quality_result else False,
             script=script,
