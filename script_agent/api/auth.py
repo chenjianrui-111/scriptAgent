@@ -328,22 +328,11 @@ async def get_auth_context(
     认证依赖 — 从请求中提取认证信息
 
     支持:
-      1. X-API-Key header
-      2. Authorization: Bearer <jwt>
-      3. 开发模式: 无认证 (APP_ENV=development)
+      1. Authorization: Bearer <jwt> (优先)
+      2. X-API-Key header
+      3. 开发模式: 无认证 (APP_ENV=development, 且未提供显式认证)
     """
-    # 开发模式跳过认证
-    if os.getenv("APP_ENV", "development") == "development":
-        tenant_id = request.headers.get("X-Tenant-Id", "tenant_dev")
-        user_id = request.headers.get("X-User-Id", "dev_user")
-        return AuthContext(
-            tenant_id=tenant_id,
-            auth_method="dev_bypass",
-            role=request.headers.get("X-Role", "admin"),
-            user_id=user_id,
-        )
-
-    # 方式1: JWT Bearer
+    # 方式1: JWT Bearer (始终优先，避免和 API Key/dev bypass 冲突)
     if credentials:
         payload = _jwt_validator.validate(credentials.credentials)
         if not payload:
@@ -372,12 +361,26 @@ async def get_auth_context(
         # 限流
         if not _rate_limiter.check(tenant.tenant_id, tenant.rate_limit):
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        raw_user_id = str(request.headers.get("X-User-Id", "") or "").strip()
+        # API Key 默认是服务身份；若调用方传了用户标识，则按用户作用域隔离历史。
+        scoped_user_id = f"api_key_user:{raw_user_id}" if raw_user_id else f"service:{tenant.tenant_id}"
         return AuthContext(
             tenant_id=tenant.tenant_id,
             auth_method="api_key",
             role="service",
-            user_id=f"service:{tenant.tenant_id}",
+            user_id=scoped_user_id,
             tenant_info=tenant,
+        )
+
+    # 方式3: 开发模式跳过认证 (仅在未提供显式认证时生效)
+    if os.getenv("APP_ENV", "development") == "development":
+        tenant_id = request.headers.get("X-Tenant-Id", "tenant_dev")
+        user_id = request.headers.get("X-User-Id", "dev_user")
+        return AuthContext(
+            tenant_id=tenant_id,
+            auth_method="dev_bypass",
+            role=request.headers.get("X-Role", "admin"),
+            user_id=user_id,
         )
 
     raise HTTPException(

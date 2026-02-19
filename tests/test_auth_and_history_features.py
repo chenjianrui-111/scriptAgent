@@ -181,6 +181,99 @@ def test_dev_bypass_user_header_isolates_histories(monkeypatch):
     assert sid2 in ids2 and sid1 not in ids2
 
 
+def test_development_env_still_honors_bearer_user_isolation(monkeypatch):
+    """
+    回归场景:
+      APP_ENV=development 下，若请求携带 Bearer，不应被 dev_bypass 覆盖。
+    """
+    monkeypatch.setenv("APP_ENV", "development")
+    client = TestClient(api_module.app)
+
+    tenant = "tenant_dev"
+    username_a = f"devBearerA_{uuid.uuid4().hex[:8]}"
+    username_b = f"devBearerB_{uuid.uuid4().hex[:8]}"
+    password = "Passw0rd123"
+
+    for uname in (username_a, username_b):
+        register_resp = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": uname,
+                "password": password,
+                "tenant_id": tenant,
+                "role": "user",
+            },
+        )
+        assert register_resp.status_code == 200
+
+    token_a = client.post(
+        "/api/v1/auth/login",
+        json={"username": username_a, "password": password},
+    ).json()["access_token"]
+    token_b = client.post(
+        "/api/v1/auth/login",
+        json={"username": username_b, "password": password},
+    ).json()["access_token"]
+
+    create_a = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "dev bearer A", "category": "食品"},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    create_b = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "dev bearer B", "category": "食品"},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert create_a.status_code == 200
+    assert create_b.status_code == 200
+    sid_a = create_a.json()["session_id"]
+    sid_b = create_b.json()["session_id"]
+
+    list_a = client.get("/api/v1/sessions", headers={"Authorization": f"Bearer {token_a}"})
+    list_b = client.get("/api/v1/sessions", headers={"Authorization": f"Bearer {token_b}"})
+    ids_a = [s["session_id"] for s in list_a.json()]
+    ids_b = [s["session_id"] for s in list_b.json()]
+    assert sid_a in ids_a and sid_b not in ids_a
+    assert sid_b in ids_b and sid_a not in ids_b
+
+
+def test_api_key_with_user_header_isolates_histories(monkeypatch):
+    """
+    同租户同 API Key 场景下，若带 X-User-Id，应按用户作用域隔离会话历史。
+    """
+    monkeypatch.setenv("APP_ENV", "production")
+    client = TestClient(api_module.app)
+
+    h1 = {"X-API-Key": "sk-dev-test-key-001", "X-User-Id": "u_api_1"}
+    h2 = {"X-API-Key": "sk-dev-test-key-001", "X-User-Id": "u_api_2"}
+
+    c1 = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "api user 1", "category": "美妆"},
+        headers=h1,
+    )
+    c2 = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "api user 2", "category": "食品"},
+        headers=h2,
+    )
+    assert c1.status_code == 200
+    assert c2.status_code == 200
+    sid1 = c1.json()["session_id"]
+    sid2 = c2.json()["session_id"]
+
+    l1 = client.get("/api/v1/sessions", headers=h1)
+    l2 = client.get("/api/v1/sessions", headers=h2)
+    ids1 = [s["session_id"] for s in l1.json()]
+    ids2 = [s["session_id"] for s in l2.json()]
+    assert sid1 in ids1 and sid2 not in ids1
+    assert sid2 in ids2 and sid1 not in ids2
+
+    cross_get = client.get(f"/api/v1/sessions/{sid2}", headers=h1)
+    assert cross_get.status_code == 403
+
+
 def test_frontend_config_hides_connection_panel_in_production(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.delenv("FRONTEND_EXPOSE_CONNECTION_PANEL", raising=False)

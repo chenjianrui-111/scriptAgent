@@ -152,10 +152,10 @@ async def _load_session_with_tenant_check(
         raise HTTPException(status_code=404, detail="会话不存在")
     if session.tenant_id != auth.tenant_id:
         raise HTTPException(status_code=403, detail="无权访问该会话")
-    # JWT 用户级隔离: 同租户下不同用户不可互看历史。
-    if auth.auth_method == "jwt":
+    # 用户级隔离: 非服务身份(如 JWT/dev_bypass/API key + X-User-Id)不可互看历史。
+    current_user_id = _resolve_owner_scope(auth)
+    if current_user_id:
         owner_user_id = str(getattr(session, "owner_user_id", "") or "").strip()
-        current_user_id = str(getattr(auth, "user_id", "") or "").strip()
         if not owner_user_id:
             raise HTTPException(
                 status_code=403,
@@ -164,6 +164,14 @@ async def _load_session_with_tenant_check(
         if owner_user_id != current_user_id:
             raise HTTPException(status_code=403, detail="无权访问其他用户会话")
     return session
+
+
+def _resolve_owner_scope(auth: AuthContext) -> str:
+    user_id = str(getattr(auth, "user_id", "") or "").strip()
+    # service:* 视为系统服务身份，不做用户级过滤。
+    if not user_id or user_id.startswith("service:"):
+        return ""
+    return user_id
 
 
 def _estimate_token_cost(query: str, include_output_budget: bool = False) -> int:
@@ -304,7 +312,7 @@ async def create_session(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """创建新会话 — tenant_id 自动从认证信息注入"""
-    owner_user_id = auth.user_id if auth.auth_method in {"jwt", "dev_bypass"} else ""
+    owner_user_id = _resolve_owner_scope(auth)
     session = await session_manager.create(
         tenant_id=auth.tenant_id,
         owner_user_id=owner_user_id,
@@ -415,7 +423,7 @@ async def generate_script_stream(
 @app.get("/api/v1/sessions")
 async def list_sessions(auth: AuthContext = Depends(get_auth_context)):
     """列出当前租户的会话"""
-    owner_user_id = auth.user_id if auth.auth_method in {"jwt", "dev_bypass"} else ""
+    owner_user_id = _resolve_owner_scope(auth)
     return await session_manager.list_sessions(
         tenant_id=auth.tenant_id,
         owner_user_id=owner_user_id,
