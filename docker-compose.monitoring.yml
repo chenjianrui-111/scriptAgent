@@ -1,6 +1,6 @@
 services:
   prometheus:
-    image: prom/prometheus:v2.54.1
+    image: m.daocloud.io/docker.io/prom/prometheus:v2.54.1
     container_name: script-agent-prometheus
     restart: unless-stopped
     command:
@@ -17,7 +17,7 @@ services:
       - script-agent
 
   grafana:
-    image: grafana/grafana:11.2.0
+    image: m.daocloud.io/docker.io/grafana/grafana:11.2.0
     container_name: script-agent-grafana
     restart: unless-stopped
     environment:
