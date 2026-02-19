@@ -1518,7 +1518,7 @@ class TestEnterpriseFeatures:
         )
         assert trimmed.startswith("这一段我们重点补充限时福利")
 
-    def test_script_generation_skill_fails_on_script_agent_error(self):
+    def test_script_generation_skill_degrades_on_script_agent_error(self):
         from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
         from script_agent.skills.base import SkillContext
         from script_agent.models.context import InfluencerProfile, SessionContext
@@ -1553,12 +1553,15 @@ class TestEnterpriseFeatures:
                 trace_id="trace-skill-error",
             )
             result = await skill.execute(ctx)
-            assert result.success is False
-            assert "模型不可用" in result.message
+            assert result.success is True
+            assert result.data.get("degraded") is True
+            assert "兜底文案" in result.message
+            assert result.script is not None
+            assert len(result.script.content.strip()) >= 40
 
         asyncio.run(_test())
 
-    def test_script_generation_skill_fails_on_empty_script(self):
+    def test_script_generation_skill_degrades_on_empty_script(self):
         from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
         from script_agent.skills.base import SkillContext
         from script_agent.models.context import InfluencerProfile, SessionContext
@@ -1590,12 +1593,15 @@ class TestEnterpriseFeatures:
                 trace_id="trace-skill-empty",
             )
             result = await skill.execute(ctx)
-            assert result.success is False
-            assert "为空" in result.message
+            assert result.success is True
+            assert result.data.get("degraded") is True
+            assert "兜底文案" in result.message
+            assert result.script is not None
+            assert len(result.script.content.strip()) >= 40
 
         asyncio.run(_test())
 
-    def test_script_generation_skill_fails_on_short_script(self):
+    def test_script_generation_skill_degrades_on_short_script(self):
         from script_agent.skills.builtin.script_gen import ScriptGenerationSkill
         from script_agent.skills.base import SkillContext
         from script_agent.models.context import InfluencerProfile, SessionContext
@@ -1631,8 +1637,11 @@ class TestEnterpriseFeatures:
                     trace_id="trace-skill-short",
                 )
                 result = await skill.execute(ctx)
-                assert result.success is False
-                assert "不足40字" in result.message
+                assert result.success is True
+                assert result.data.get("degraded") is True
+                assert "兜底文案" in result.message
+                assert result.script is not None
+                assert len(result.script.content.strip()) >= 40
             finally:
                 settings.llm.script_min_chars = old_min_chars
 
