@@ -18,8 +18,8 @@ ScriptAgent 解决的是“可持续、多轮可控、可上线运营”的话�
 
 ---
 
-## 二、系统架构（简版）
-
+## 二、系统架构
+详情可看/docs/architecture.mmd
 ```text
 Web UI / API Client
         |
