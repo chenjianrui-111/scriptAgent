@@ -13,6 +13,19 @@ def _headers(tenant: str = "tenant_dev", role: str = "admin", bearer: str = ""):
     return h
 
 
+def _headers_with_api_and_bearer(
+    bearer: str,
+    api_key: str = "sk-dev-test-key-001",
+    tenant: str = "tenant_hijack",
+):
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "X-API-Key": api_key,
+        "X-Tenant-Id": tenant,
+        "X-Role": "user",
+    }
+
+
 def test_delete_session_history_endpoint():
     client = TestClient(api_module.app)
     create = client.post(
@@ -71,6 +84,101 @@ def test_register_login_and_bearer_access_in_production(monkeypatch):
     )
     assert create_session_resp.status_code == 200
     assert create_session_resp.json().get("session_id")
+
+
+def test_jwt_user_session_isolation_with_same_tenant(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    client = TestClient(api_module.app)
+
+    tenant = "tenant_dev"
+    username_a = f"userA_{uuid.uuid4().hex[:8]}"
+    username_b = f"userB_{uuid.uuid4().hex[:8]}"
+    password = "Passw0rd123"
+
+    for uname in (username_a, username_b):
+        register_resp = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": uname,
+                "password": password,
+                "tenant_id": tenant,
+                "role": "user",
+            },
+        )
+        assert register_resp.status_code == 200
+
+    login_a = client.post(
+        "/api/v1/auth/login",
+        json={"username": username_a, "password": password},
+    )
+    login_b = client.post(
+        "/api/v1/auth/login",
+        json={"username": username_b, "password": password},
+    )
+    token_a = login_a.json().get("access_token", "")
+    token_b = login_b.json().get("access_token", "")
+    assert token_a and token_b
+
+    create_a = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "A会话", "category": "食品"},
+        headers=_headers_with_api_and_bearer(token_a),
+    )
+    create_b = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "B会话", "category": "食品"},
+        headers=_headers_with_api_and_bearer(token_b),
+    )
+    assert create_a.status_code == 200
+    assert create_b.status_code == 200
+    sid_a = create_a.json()["session_id"]
+    sid_b = create_b.json()["session_id"]
+    assert sid_a != sid_b
+
+    list_a = client.get("/api/v1/sessions", headers=_headers_with_api_and_bearer(token_a))
+    list_b = client.get("/api/v1/sessions", headers=_headers_with_api_and_bearer(token_b))
+    assert list_a.status_code == 200
+    assert list_b.status_code == 200
+    sessions_a = [s["session_id"] for s in list_a.json()]
+    sessions_b = [s["session_id"] for s in list_b.json()]
+    assert sid_a in sessions_a
+    assert sid_b in sessions_b
+    assert sid_b not in sessions_a
+    assert sid_a not in sessions_b
+
+    cross_get = client.get(
+        f"/api/v1/sessions/{sid_b}",
+        headers=_headers_with_api_and_bearer(token_a),
+    )
+    assert cross_get.status_code == 403
+
+
+def test_dev_bypass_user_header_isolates_histories(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "development")
+    client = TestClient(api_module.app)
+
+    h1 = {"X-Tenant-Id": "tenant_dev", "X-Role": "admin", "X-User-Id": "dev-u1"}
+    h2 = {"X-Tenant-Id": "tenant_dev", "X-Role": "admin", "X-User-Id": "dev-u2"}
+
+    c1 = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "dev1", "category": "美妆"},
+        headers=h1,
+    )
+    c2 = client.post(
+        "/api/v1/sessions",
+        json={"influencer_name": "dev2", "category": "食品"},
+        headers=h2,
+    )
+    sid1 = c1.json()["session_id"]
+    sid2 = c2.json()["session_id"]
+
+    l1 = client.get("/api/v1/sessions", headers=h1)
+    l2 = client.get("/api/v1/sessions", headers=h2)
+    ids1 = [s["session_id"] for s in l1.json()]
+    ids2 = [s["session_id"] for s in l2.json()]
+    assert sid1 in ids1 and sid2 not in ids1
+    assert sid2 in ids2 and sid1 not in ids2
 
 
 def test_frontend_config_hides_connection_panel_in_production(monkeypatch):

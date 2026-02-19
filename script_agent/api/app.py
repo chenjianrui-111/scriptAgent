@@ -146,12 +146,23 @@ class LoginResponse(BaseModel):
 async def _load_session_with_tenant_check(
     session_id: str, auth: AuthContext
 ):
-    """加载会话并校验租户归属"""
+    """加载会话并校验租户 + 用户归属"""
     session = await session_manager.load(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     if session.tenant_id != auth.tenant_id:
         raise HTTPException(status_code=403, detail="无权访问该会话")
+    # JWT 用户级隔离: 同租户下不同用户不可互看历史。
+    if auth.auth_method == "jwt":
+        owner_user_id = str(getattr(session, "owner_user_id", "") or "").strip()
+        current_user_id = str(getattr(auth, "user_id", "") or "").strip()
+        if not owner_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="该会话未绑定用户归属，无法跨用户访问，请新建会话",
+            )
+        if owner_user_id != current_user_id:
+            raise HTTPException(status_code=403, detail="无权访问其他用户会话")
     return session
 
 
@@ -293,8 +304,10 @@ async def create_session(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """创建新会话 — tenant_id 自动从认证信息注入"""
+    owner_user_id = auth.user_id if auth.auth_method in {"jwt", "dev_bypass"} else ""
     session = await session_manager.create(
         tenant_id=auth.tenant_id,
+        owner_user_id=owner_user_id,
         influencer_id=req.influencer_id,
         influencer_name=req.influencer_name,
         category=req.category,
@@ -402,7 +415,11 @@ async def generate_script_stream(
 @app.get("/api/v1/sessions")
 async def list_sessions(auth: AuthContext = Depends(get_auth_context)):
     """列出当前租户的会话"""
-    return await session_manager.list_sessions(tenant_id=auth.tenant_id)
+    owner_user_id = auth.user_id if auth.auth_method in {"jwt", "dev_bypass"} else ""
+    return await session_manager.list_sessions(
+        tenant_id=auth.tenant_id,
+        owner_user_id=owner_user_id,
+    )
 
 
 @app.get("/api/v1/sessions/{session_id}")

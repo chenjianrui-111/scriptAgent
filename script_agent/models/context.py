@@ -108,6 +108,7 @@ class SessionContext:
     # 基础信息
     session_id: str = ""
     tenant_id: str = ""
+    owner_user_id: str = ""
     influencer_id: str = ""
     influencer_name: str = ""
     category: str = ""

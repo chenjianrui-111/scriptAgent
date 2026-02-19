@@ -47,6 +47,7 @@ class AuthContext:
     tenant_id: str
     auth_method: str              # "api_key" | "jwt"
     role: str = "user"
+    user_id: str = ""
     tenant_info: Optional[TenantInfo] = None
 
 
@@ -334,13 +335,35 @@ async def get_auth_context(
     # 开发模式跳过认证
     if os.getenv("APP_ENV", "development") == "development":
         tenant_id = request.headers.get("X-Tenant-Id", "tenant_dev")
+        user_id = request.headers.get("X-User-Id", "dev_user")
         return AuthContext(
             tenant_id=tenant_id,
             auth_method="dev_bypass",
             role=request.headers.get("X-Role", "admin"),
+            user_id=user_id,
         )
 
-    # 方式1: API Key
+    # 方式1: JWT Bearer
+    if credentials:
+        payload = _jwt_validator.validate(credentials.credentials)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        tenant_id = payload.get("tenant_id", "")
+        user_id = payload.get("sub", "")
+        if not tenant_id:
+            raise HTTPException(status_code=401, detail="Missing tenant_id in token")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Missing subject in token")
+        if not _rate_limiter.check(tenant_id):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        return AuthContext(
+            tenant_id=tenant_id,
+            auth_method="jwt",
+            role=payload.get("role", "user"),
+            user_id=user_id,
+        )
+
+    # 方式2: API Key (当没有 Bearer 时才使用)
     api_key = request.headers.get("X-API-Key")
     if api_key:
         tenant = _api_key_manager.validate(api_key)
@@ -353,23 +376,8 @@ async def get_auth_context(
             tenant_id=tenant.tenant_id,
             auth_method="api_key",
             role="service",
+            user_id=f"service:{tenant.tenant_id}",
             tenant_info=tenant,
-        )
-
-    # 方式2: JWT Bearer
-    if credentials:
-        payload = _jwt_validator.validate(credentials.credentials)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        tenant_id = payload.get("tenant_id", "")
-        if not tenant_id:
-            raise HTTPException(status_code=401, detail="Missing tenant_id in token")
-        if not _rate_limiter.check(tenant_id):
-            raise HTTPException(status_code=429, detail="Rate limit exceeded")
-        return AuthContext(
-            tenant_id=tenant_id,
-            auth_method="jwt",
-            role=payload.get("role", "user"),
         )
 
     raise HTTPException(

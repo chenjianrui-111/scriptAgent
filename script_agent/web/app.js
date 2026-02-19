@@ -105,6 +105,7 @@ const PRESET_PRODUCTS = [
 const BOT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 const CLIENT_CONFIG_KEY = 'script_agent_frontend_config_v1';
 const AUTH_TOKEN_KEY = 'script_agent_auth_token';
+const DEV_USER_ID_KEY = 'script_agent_dev_user_id_v1';
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const REGEN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
@@ -757,6 +758,18 @@ function buildApiUrl(path) {
   return base.replace(/\/+$/, '') + path;
 }
 
+function getOrCreateDevUserId() {
+  try {
+    var cached = localStorage.getItem(DEV_USER_ID_KEY);
+    if (cached && cached.trim()) return cached.trim();
+    var generated = 'dev-user-' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem(DEV_USER_ID_KEY, generated);
+    return generated;
+  } catch (_) {
+    return 'dev-user';
+  }
+}
+
 function collectHeaders() {
   var headers = {
     'Content-Type': 'application/json',
@@ -769,10 +782,16 @@ function collectHeaders() {
     bearerToken = (appState.authToken || '').trim();
   }
 
+  // 用户登录态优先: 避免同时发送 API Key 导致后端按服务身份处理。
+  if (bearerToken) {
+    headers.Authorization = 'Bearer ' + bearerToken;
+    return headers;
+  }
+
   if (tenantId) headers['X-Tenant-Id'] = tenantId;
   if (role) headers['X-Role'] = role;
+  headers['X-User-Id'] = getOrCreateDevUserId();
   if (apiKey) headers['X-API-Key'] = apiKey;
-  if (bearerToken) headers.Authorization = 'Bearer ' + bearerToken;
   return headers;
 }
 

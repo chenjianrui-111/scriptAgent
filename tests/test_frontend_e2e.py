@@ -753,6 +753,16 @@ def test_stream_error_has_frontend_fallback_copy(monkeypatch):
     assert "emitFallbackScript" in js
 
 
+def test_collect_headers_prefers_bearer_over_api_key(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    client = TestClient(api_module.app)
+    js = client.get("/web/app.js").text
+    assert "if (bearerToken) {" in js
+    assert "headers.Authorization = 'Bearer ' + bearerToken;" in js
+    assert "return headers;" in js
+    assert "headers['X-User-Id'] = getOrCreateDevUserId();" in js
+
+
 # ===================================================================
 # Group 15: Auth & Tenant Isolation (existing, preserved)
 # ===================================================================

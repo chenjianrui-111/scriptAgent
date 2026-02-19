@@ -67,6 +67,7 @@ class SessionSerializer:
         return {
             "session_id": session.session_id,
             "tenant_id": session.tenant_id,
+            "owner_user_id": session.owner_user_id,
             "influencer_id": session.influencer_id,
             "influencer_name": session.influencer_name,
             "category": session.category,
@@ -125,6 +126,7 @@ class SessionSerializer:
         return SessionContext(
             session_id=data["session_id"],
             tenant_id=data.get("tenant_id", ""),
+            owner_user_id=data.get("owner_user_id", ""),
             influencer_id=data.get("influencer_id", ""),
             influencer_name=data.get("influencer_name", ""),
             category=data.get("category", ""),
@@ -366,6 +368,7 @@ class SessionManager:
         logger.info(f"SessionManager using store: {type(self._store).__name__}")
 
     async def create(self, tenant_id: str = "",
+                     owner_user_id: str = "",
                      influencer_id: str = "",
                      influencer_name: str = "",
                      category: str = "") -> SessionContext:
@@ -373,6 +376,7 @@ class SessionManager:
         session = SessionContext(
             session_id=str(uuid.uuid4()),
             tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
             influencer_id=influencer_id,
             influencer_name=influencer_name,
             category=category,
@@ -405,13 +409,19 @@ class SessionManager:
         """删除会话"""
         await self._store.delete(session_id)
 
-    async def list_sessions(self, tenant_id: str = "") -> list:
+    async def list_sessions(self, tenant_id: str = "", owner_user_id: str = "") -> list:
         """列出会话"""
         all_data = await self._store.list_all(tenant_id)
+        if owner_user_id:
+            all_data = [
+                d for d in all_data
+                if str(d.get("owner_user_id", "")).strip() == owner_user_id
+            ]
         return [
             {
                 "session_id": d["session_id"],
                 "tenant_id": d.get("tenant_id", ""),
+                "owner_user_id": d.get("owner_user_id", ""),
                 "influencer_name": d.get("influencer_name", ""),
                 "turn_count": len(d.get("turns", [])),
                 "created_at": d.get("created_at", ""),
