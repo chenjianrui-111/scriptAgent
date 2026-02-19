@@ -74,7 +74,15 @@ COMPOSE_BAKE=false DOCKER_BUILDKIT=0 docker compose -f docker-compose.prod.yml u
 
 echo "[5/5] Health check"
 ssh -p "${SSH_PORT}" -i "${SSH_KEY}" "${REMOTE}" "\
-curl -sS --max-time 15 http://127.0.0.1:8080/api/v1/health"
+set -euo pipefail; \
+for i in 1 2 3 4 5 6; do \
+  if curl -sS --max-time 15 http://127.0.0.1:8080/api/v1/health; then \
+    exit 0; \
+  fi; \
+  sleep 2; \
+done; \
+echo 'ERROR: health check failed after retries'; \
+exit 1"
 
 echo
 echo "Release success:"
