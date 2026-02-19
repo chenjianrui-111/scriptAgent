@@ -5,6 +5,48 @@
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-02-19
+
+### Added
+
+- 新增完整监控栈与面板配置：
+  - `docker-compose.monitoring.yml`（Prometheus + Grafana）
+  - `monitoring/prometheus/prometheus.yml`（Prometheus 抓取配置）
+  - `monitoring/grafana/provisioning/*`（数据源与仪表盘自动加载）
+  - `monitoring/grafana/dashboards/script-agent-overview.json`（运行总览面板）
+- 新增监控使用文档 `docs/MONITORING.md`，覆盖本地/线上启动、验收与安全建议。
+- 新增监控回归测试 `tests/test_monitoring_metrics.py`，验证 `/metrics` 输出关键指标。
+- 新增 HTTP 层监控埋点（`script_agent/api/app.py`）：
+  - `script_agent_http_requests_total`
+  - `script_agent_http_request_duration_seconds`
+  - `script_agent_http_inflight_requests`
+- 新增会话生命周期指标（`script_agent/observability/metrics.py` + `script_agent/services/session_manager.py`）：
+  - `script_agent_session_events_total`
+  - `script_agent_active_sessions`
+
+### Changed
+
+- 指标体系增强（`script_agent/observability/metrics.py`）：
+  - 新增 `script_agent_app` 应用信息指标
+  - 增加阶段耗时观测便捷方法（毫秒/秒）
+- 编排链路补齐过程指标（`script_agent/agents/orchestrator.py`）：
+  - 记录质量分与质量通过率
+  - 回填 workflow 各阶段时延直方图
+  - 记录生成计数（按 category/scenario）
+- 配置样例补充 Grafana 账户变量（`.env.example`、`.env.production.example`）。
+- README 补充监控面板部署入口与文档链接（`README.md`）。
+- 监控镜像源调整（`docker-compose.monitoring.yml`）：
+  - 采用 `m.daocloud.io/docker.io/*` 镜像，提升国内 ECS 拉取成功率。
+
+### Fixed
+
+- 修复租户隔离在多认证方式下的会话越权问题（`script_agent/api/auth.py`、`script_agent/api/app.py`）：
+  - 认证优先级调整为 `Bearer > API Key > dev_bypass`
+  - 引入统一 owner 作用域判定，JWT/dev/APIKey+X-User-Id 均按用户隔离
+  - 修复开发环境下 Bearer 被 bypass 覆盖导致历史串读的问题
+- 修复同租户同 API Key 场景下不同用户历史可见性问题（支持 `X-User-Id` 作用域隔离）。
+- 补充租户隔离回归测试（`tests/test_auth_and_history_features.py`），覆盖开发/生产与混合认证场景。
+
 ## [1.5.3] - 2026-02-17
 
 ### Added

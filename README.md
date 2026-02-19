@@ -372,6 +372,7 @@ docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
 访问：
 - Prometheus：`http://<server-ip>:9090`
 - Grafana：`http://<server-ip>:3000`
+- 若公网无法访问，请在云安全组放行 TCP `3000`、`9090`（生产建议仅对内网开放 `9090`）
 
 默认账号：
 - 用户名：`admin`
