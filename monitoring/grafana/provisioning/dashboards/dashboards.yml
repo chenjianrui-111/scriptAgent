@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: script-agent
+    orgId: 1
+    folder: ScriptAgent
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

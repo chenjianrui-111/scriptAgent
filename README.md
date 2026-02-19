@@ -4,6 +4,7 @@
 
 - 版本演进：`CHANGELOG.md`
 - 阿里云部署手册：`DEPLOY_ALIYUN_ECS.md`
+- 监控面板手册：`docs/MONITORING.md`
 - 架构图与高保真生成提示词：`docs/architecture.mmd`、`docs/architecture_prompt_for_gemini.md`
 
 ---
@@ -361,6 +362,22 @@ curl -sS http://127.0.0.1:8080/api/v1/health
 ### 2) 阿里云 ECS
 
 详见：`DEPLOY_ALIYUN_ECS.md`
+
+### 3) 监控面板（Prometheus + Grafana）
+
+```bash
+docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d --build
+```
+
+访问：
+- Prometheus：`http://<server-ip>:9090`
+- Grafana：`http://<server-ip>:3000`
+
+默认账号：
+- 用户名：`admin`
+- 密码：`admin123`
+
+更多细节（指标说明、线上安全建议）见：`docs/MONITORING.md`
 
 ---
 

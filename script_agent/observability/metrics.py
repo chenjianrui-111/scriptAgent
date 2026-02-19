@@ -13,6 +13,7 @@ Prometheus 指标采集
 
 import time
 import logging
+import threading
 from contextlib import contextmanager
 from typing import Optional
 
@@ -20,6 +21,28 @@ logger = logging.getLogger(__name__)
 
 try:
     from prometheus_client import Counter, Histogram, Gauge, Info
+
+    APP_INFO = Info(
+        "script_agent_app",
+        "ScriptAgent app metadata",
+    )
+
+    # API层指标
+    HTTP_REQUESTS = Counter(
+        "script_agent_http_requests_total",
+        "HTTP requests count",
+        ["method", "path", "status"],
+    )
+    HTTP_REQUEST_LATENCY = Histogram(
+        "script_agent_http_request_duration_seconds",
+        "HTTP request latency",
+        ["method", "path"],
+        buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+    )
+    HTTP_INFLIGHT = Gauge(
+        "script_agent_http_inflight_requests",
+        "In-flight HTTP requests",
+    )
 
     # 请求指标
     REQUEST_COUNT = Counter(
@@ -54,7 +77,12 @@ try:
     # 系统指标
     ACTIVE_SESSIONS = Gauge(
         "script_agent_active_sessions",
-        "Active sessions count",
+        "Tracked active sessions in current process",
+    )
+    SESSION_EVENTS = Counter(
+        "script_agent_session_events_total",
+        "Session lifecycle events",
+        ["event"],  # created / deleted
     )
     INTENT_CONFIDENCE = Histogram(
         "script_agent_intent_confidence",
@@ -97,6 +125,52 @@ except ImportError:
 #  便捷 API (安全调用, 不依赖 prometheus_client)
 # ======================================================================
 
+_ACTIVE_SESSION_IDS: set[str] = set()
+_ACTIVE_SESSIONS_LOCK = threading.Lock()
+
+
+def set_app_info(name: str, version: str, env: str):
+    if _METRICS_AVAILABLE:
+        APP_INFO.info({"name": name, "version": version, "env": env})
+
+
+def observe_http_request(method: str, path: str, status: int, elapsed_seconds: float):
+    if _METRICS_AVAILABLE:
+        status_str = str(status)
+        HTTP_REQUESTS.labels(method=method, path=path, status=status_str).inc()
+        HTTP_REQUEST_LATENCY.labels(method=method, path=path).observe(
+            max(0.0, elapsed_seconds)
+        )
+
+
+def inc_http_inflight():
+    if _METRICS_AVAILABLE:
+        HTTP_INFLIGHT.inc()
+
+
+def dec_http_inflight():
+    if _METRICS_AVAILABLE:
+        HTTP_INFLIGHT.dec()
+
+
+def mark_session_created(session_id: str):
+    if not _METRICS_AVAILABLE or not session_id:
+        return
+    SESSION_EVENTS.labels(event="created").inc()
+    with _ACTIVE_SESSIONS_LOCK:
+        _ACTIVE_SESSION_IDS.add(session_id)
+        ACTIVE_SESSIONS.set(len(_ACTIVE_SESSION_IDS))
+
+
+def mark_session_deleted(session_id: str):
+    if not _METRICS_AVAILABLE or not session_id:
+        return
+    SESSION_EVENTS.labels(event="deleted").inc()
+    with _ACTIVE_SESSIONS_LOCK:
+        _ACTIVE_SESSION_IDS.discard(session_id)
+        ACTIVE_SESSIONS.set(len(_ACTIVE_SESSION_IDS))
+
+
 def record_request(intent: str, status: str, skill: str = "none"):
     if _METRICS_AVAILABLE:
         REQUEST_COUNT.labels(intent=intent, status=status, skill=skill).inc()
@@ -136,6 +210,15 @@ def record_workflow_cache_hit():
 def record_checkpoint(status: str):
     if _METRICS_AVAILABLE:
         CHECKPOINT_WRITES.labels(status=status).inc()
+
+
+def observe_stage_latency_seconds(stage: str, elapsed_seconds: float):
+    if _METRICS_AVAILABLE:
+        REQUEST_LATENCY.labels(stage=stage).observe(max(0.0, elapsed_seconds))
+
+
+def observe_stage_latency_ms(stage: str, elapsed_ms: float):
+    observe_stage_latency_seconds(stage, elapsed_ms / 1000.0)
 
 
 @contextmanager

@@ -15,11 +15,12 @@ API层 - FastAPI应用
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Application starting up")
+    obs.set_app_info(settings.app_name, app.version, settings.env)
     yield
     logger.info("Application shutting down")
     await orchestrator.shutdown()
@@ -82,6 +84,33 @@ session_manager = SessionManager()
 session_lock_manager = create_session_lock_manager()
 checkpoint_manager = WorkflowCheckpointManager()
 core_rate_limiter = CoreRateLimiter()
+
+
+def _resolve_metrics_path(request: Request) -> str:
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", "")
+    if route_path:
+        return route_path
+    return request.url.path
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    path = _resolve_metrics_path(request)
+    method = request.method
+    status_code = 500
+    start = time.perf_counter()
+    obs.inc_http_inflight()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        obs.dec_http_inflight()
+        # 避免 Prometheus 抓取本身淹没业务流量指标。
+        if path != "/metrics":
+            elapsed = time.perf_counter() - start
+            obs.observe_http_request(method, path, status_code, elapsed)
 
 
 # ===================================================================

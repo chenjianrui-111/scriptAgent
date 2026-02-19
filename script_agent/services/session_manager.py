@@ -22,6 +22,7 @@ from script_agent.models.context import (
 )
 from script_agent.models.message import GeneratedScript
 from script_agent.config.settings import settings
+from script_agent.observability import metrics as obs
 
 logger = logging.getLogger(__name__)
 _TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9_]+")
@@ -386,6 +387,7 @@ class SessionManager:
             session.session_id,
             self._serializer.to_dict(session),
         )
+        obs.mark_session_created(session.session_id)
         logger.info(f"Session created: {session.session_id}")
         return session
 
@@ -408,6 +410,7 @@ class SessionManager:
     async def delete(self, session_id: str):
         """删除会话"""
         await self._store.delete(session_id)
+        obs.mark_session_deleted(session_id)
 
     async def list_sessions(self, tenant_id: str = "", owner_user_id: str = "") -> list:
         """列出会话"""

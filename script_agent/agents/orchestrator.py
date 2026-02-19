@@ -677,6 +677,7 @@ class Orchestrator:
         quality_response = await self.quality_agent(quality_msg)
         self._raise_if_agent_error(quality_response, "quality_check")
         quality_result = quality_response.payload.get("quality_result", QualityResult())
+        obs.record_quality(quality_result.overall_score, quality_result.passed)
 
         retry_count = int(state.get("retry_count", 0))
         should_retry = False
@@ -774,6 +775,16 @@ class Orchestrator:
                 intent_result.intent if intent_result else "unknown",
                 "success" if result.get("success") else "error",
                 result.get("skill_used", "default"),
+            )
+        for stage, elapsed_ms in timing.items():
+            try:
+                obs.observe_stage_latency_ms(stage, float(elapsed_ms))
+            except (TypeError, ValueError):
+                continue
+        if script is not None:
+            obs.record_generation(
+                script.category or session.category or "unknown",
+                script.scenario or "unknown",
             )
         if result.get("success") and script is not None:
             await self._remember_long_term(state, script)

@@ -21,7 +21,7 @@ jieba>=0.42.1               # 中文分词
 # sentence-transformers>=2.5.0  # 高质量embedding模型
 
 # ===== Monitoring =====
-# prometheus-client>=0.19.0 # Prometheus指标
+prometheus-client>=0.19.0   # Prometheus指标
 # opentelemetry-api>=1.21.0 # OpenTelemetry链路追踪
 
 # ===== Dev =====
