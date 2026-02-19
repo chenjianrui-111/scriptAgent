@@ -331,7 +331,8 @@ class ScriptGenerationAgent(BaseAgent):
         self.sensitive_filter = SensitiveWordFilter()
         self.context_compressor = SessionContextCompressor()
         self.min_chars = max(1, settings.llm.script_min_chars)
-        self.primary_attempts = max(1, settings.llm.script_primary_attempts)
+        # 线上模型波动时，至少重试 3 次可明显降低空结果/截断概率。
+        self.primary_attempts = max(3, settings.llm.script_primary_attempts)
         self._separator_only_re = re.compile(r"^[-—_=*`.\s]{2,}$")
         self._meta_line_re = re.compile(
             r"^\s*-\s*(?:\*\*)?"
@@ -359,9 +360,12 @@ class ScriptGenerationAgent(BaseAgent):
             ),
         )
         self._tail_incomplete_suffixes = (
-            "的", "了", "和", "与", "及", "并", "在", "让", "把", "将",
-            "就", "也", "都", "更", "而", "并且", "以及", "等",
+            "的", "了", "和", "与", "及", "并", "在", "把", "将", "并且", "以及", "等",
         )
+        self._tail_soft_complete_endings = (
+            "吧", "呀", "啊", "呢", "哦", "啦", "喔", "哈", "~", "～", "…",
+        )
+        self._tail_hard_incomplete_re = re.compile(r"(比如|例如|包括|例如说|像)$")
 
     async def process(self, message: AgentMessage) -> AgentMessage:
         intent_slots = dict(message.payload.get("slots", {}))
@@ -799,14 +803,32 @@ class ScriptGenerationAgent(BaseAgent):
             return True
         if stripped.endswith(("。", "！", "？", "!", "?", "；", ";", "”", "\"", "）", ")")):
             return False
+        if stripped.endswith(self._tail_soft_complete_endings):
+            return False
         parts = re.split(r"[。！？!?；;\n]", stripped)
         tail = parts[-1].strip() if parts else stripped
         normalized_tail = self._normalize_text(tail)
         if not normalized_tail:
             return True
-        if len(normalized_tail) < 8:
+        if len(normalized_tail) < 5:
             return True
-        return any(normalized_tail.endswith(sfx) for sfx in self._tail_incomplete_suffixes)
+        # 放宽判定边界: 长正文 + 非强截断尾巴，视为可接受。
+        normalized_full = self._normalize_text(stripped)
+        if len(normalized_full) >= max(self.min_chars * 2, 80):
+            if len(normalized_tail) >= 4 and not self._tail_hard_incomplete_re.search(normalized_tail):
+                return False
+        # 已有多句完整输出时，最后一句轻微口语收尾不强制判失败。
+        sentence_count = len(
+            [p for p in parts if self._normalize_text(p.strip())]
+        )
+        if sentence_count >= 2 and len(normalized_tail) >= 4:
+            if not any(normalized_tail.endswith(sfx) for sfx in self._tail_incomplete_suffixes):
+                return False
+        if any(normalized_tail.endswith(sfx) for sfx in self._tail_incomplete_suffixes):
+            return True
+        if len(normalized_tail) >= 14:
+            return False
+        return False
 
     def _check_product_switch_consistency(
         self,
@@ -913,14 +935,14 @@ class ScriptGenerationAgent(BaseAgent):
         backend_name = type(self.llm.backend).__name__.lower()
         is_zhipu = "zhipu" in backend_name or settings.llm.primary_backend.lower() == "zhipu"
         if stream_mode:
-            base = max(settings.llm.max_tokens, 1024)
+            base = max(settings.llm.max_tokens, 1400)
             if is_zhipu:
-                base = max(base, 1400)
-            return min(2200, base)
-        base = max(800, min(settings.llm.max_tokens, 1400))
+                base = max(base, 2200)
+            return min(3200, base)
+        base = max(1000, min(settings.llm.max_tokens, 1800))
         if is_zhipu:
-            base = max(base, 1200)
-        return min(2000, base)
+            base = max(base, 1800)
+        return min(2800, base)
 
     def _resolve_attempt_max_tokens(
         self,
@@ -930,7 +952,7 @@ class ScriptGenerationAgent(BaseAgent):
         reason: str,
         stream_mode: bool,
     ) -> int:
-        max_limit = 2200 if stream_mode else 2000
+        max_limit = 3200 if stream_mode else 2800
         boost_reasons = {
             "prompt_echo_detected",
             "effective_content_too_short",
@@ -938,10 +960,14 @@ class ScriptGenerationAgent(BaseAgent):
             "tail_incomplete",
         }
         if reason in boost_reasons:
-            base = int(base * 1.25)
+            base = int(base * 1.35)
         if attempt >= 2:
-            base = int(base * 1.1)
-        return min(max_limit, max(256, base))
+            base = int(base * 1.15)
+        if reason == "tail_incomplete":
+            base += 240 if stream_mode else 180
+        if attempt >= 3:
+            base += 120
+        return min(max_limit, max(384, base))
 
     def _reduce_leading_overlap(
         self,

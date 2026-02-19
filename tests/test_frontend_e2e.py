@@ -742,6 +742,17 @@ def test_stream_cancellation_logic_in_js(monkeypatch):
     assert "appState.isStreaming = false" in js
 
 
+def test_stream_error_has_frontend_fallback_copy(monkeypatch):
+    """Frontend should include visual fallback script copy for empty/error stream."""
+    monkeypatch.setenv("APP_ENV", "development")
+    client = TestClient(api_module.app)
+
+    js = client.get("/web/app.js").text
+    assert "buildFallbackScript" in js
+    assert "【系统兜底文案】" in js
+    assert "emitFallbackScript" in js
+
+
 # ===================================================================
 # Group 15: Auth & Tenant Isolation (existing, preserved)
 # ===================================================================

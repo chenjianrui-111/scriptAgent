@@ -868,6 +868,32 @@ function buildQuery() {
   return query;
 }
 
+function buildFallbackScript(reasonText) {
+  var scenarioLabel = SCENARIO_LABELS[appState.scenario] || '直播';
+  var typeLabel = TYPE_LABELS[appState.scriptType] || '卖点介绍';
+  var categoryLabel = appState.category || '商品';
+  var productName = (appState.product && appState.product.name)
+    ? appState.product.name
+    : '这款' + categoryLabel + '商品';
+  var reason = String(reasonText || '').replace(/^\[ERROR\]\s*/, '').trim();
+
+  var lines = [
+    '【系统兜底文案】',
+    '家人们好，今天重点给大家介绍的是' + productName + '！',
+    '它在' + scenarioLabel + typeLabel + '场景里非常好讲，核心优势清晰、上手好转化。',
+    '如果你也想要一份更细分风格（活泼/专业/促销）的版本，回复“重试生成”我继续给你优化。',
+  ];
+  if (reason) {
+    lines.push('（系统提示：' + reason + '）');
+  }
+  return lines.join('\n');
+}
+
+function emitFallbackScript(reasonText) {
+  var fallbackId = addAssistantMessage(buildFallbackScript(reasonText));
+  addScriptActions(fallbackId);
+}
+
 // ── Streaming Generation ──────────────────────────────────
 
 async function doStreamGeneration(query) {
@@ -900,11 +926,11 @@ async function doStreamGeneration(query) {
       function onDone() {
         if (meaningfulCharCount <= 0) {
           removeStreamingMessage(msgId);
-          addAssistantMessage('生成失败：未返回有效内容，请重试。');
+          emitFallbackScript('未返回有效内容，已自动提供兜底稿');
           appState.flowState = FLOW.CHAT;
           appState.isStreaming = false;
-          setStatus('error');
-          showTextInput();
+          setStatus('connected');
+          showTextInput('继续对话，例如：重试生成更专业的版本...');
           return;
         }
         finalizeStreamingMessage(msgId);
@@ -918,26 +944,32 @@ async function doStreamGeneration(query) {
         loadSessionList();
       },
       function onError(errorMsg) {
+        var cleanErr = String(errorMsg || '').replace(/^\[ERROR\]\s*/, '').trim();
         if (meaningfulCharCount <= 0) {
           removeStreamingMessage(msgId);
+          emitFallbackScript(cleanErr || '生成中断，已自动提供兜底稿');
         } else {
           finalizeStreamingMessage(msgId);
+          addAssistantMessage('本次生成中断：' + (cleanErr || '请稍后重试') + '\n已保留上方可用内容。');
         }
-        var cleanErr = String(errorMsg || '').replace(/^\[ERROR\]\s*/, '').trim();
-        addAssistantMessage('生成出现问题：' + (cleanErr || '请稍后重试'));
         appState.flowState = FLOW.CHAT;
         appState.isStreaming = false;
-        setStatus('error');
-        showTextInput();
+        setStatus('connected');
+        showTextInput('继续对话，例如：重试生成并强调转化引导...');
       }
     );
   } catch (err) {
-    finalizeStreamingMessage(msgId);
-    addAssistantMessage('出现错误：' + err.message);
+    if (meaningfulCharCount <= 0) {
+      removeStreamingMessage(msgId);
+      emitFallbackScript(err && err.message ? err.message : '网络波动');
+    } else {
+      finalizeStreamingMessage(msgId);
+      addAssistantMessage('出现错误：' + err.message + '\n已保留上方可用内容。');
+    }
     appState.flowState = FLOW.CHAT;
     appState.isStreaming = false;
-    setStatus('error');
-    showTextInput();
+    setStatus('connected');
+    showTextInput('继续对话，例如：请基于上版再优化一版...');
   }
 }
 

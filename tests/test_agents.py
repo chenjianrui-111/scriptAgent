@@ -922,6 +922,35 @@ class TestOrchestrator:
             settings.llm.primary_backend = old_backend
             settings.llm.max_tokens = old_max_tokens
 
+    def test_script_agent_min_retry_attempts_is_three(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+        from script_agent.config.settings import settings
+
+        old_attempts = settings.llm.script_primary_attempts
+        try:
+            settings.llm.script_primary_attempts = 1
+            agent = ScriptGenerationAgent()
+            assert agent.primary_attempts >= 3
+        finally:
+            settings.llm.script_primary_attempts = old_attempts
+
+    def test_script_agent_tail_incomplete_boundary_relaxed(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+
+        agent = ScriptGenerationAgent()
+        long_text = (
+            "家人们今天这款连衣裙上身非常显瘦，版型利落而且面料亲肤透气，"
+            "通勤约会都能穿出气质感，直播间现在下单还送运费险和搭配建议"
+        )
+        assert agent._is_tail_incomplete(long_text) is False
+
+    def test_script_agent_tail_incomplete_still_detects_hard_truncation(self):
+        from script_agent.agents.script_agent import ScriptGenerationAgent
+
+        agent = ScriptGenerationAgent()
+        truncated = "这款T恤采用260g重磅纯棉面料，穿起来挺阔有型，而且细节做工的"
+        assert agent._is_tail_incomplete(truncated) is True
+
 
 class TestEnterpriseFeatures:
     """企业级能力测试: 恢复机制 + 并发管理"""
