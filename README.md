@@ -104,7 +104,7 @@ Protocol Layer (标准化对外协议)
   - 生成脚本列表裁剪
 - `ScriptGenerationAgent` 已接入 `SessionContextCompressor`，多轮场景会优先使用压缩会话记忆构建 Prompt。
 
-### 8) Kafka异步任务队列（新增 🚀）
+### 8) Kafka异步任务队列
 - **问题**：API同步处理导致高峰期P99延迟达8.2s，用户体验差
 - **方案**：引入Kafka消息队列实现异步任务处理
   - API立即返回task_id（P99 < 200ms）
@@ -121,7 +121,7 @@ Protocol Layer (标准化对外协议)
   - 长耗时操作（如视频话术生成）
 - **示例**：`examples/kafka_async_example.py`
 
-### 9) MCP协议支持（新增 🚀）
+### 9) MCP协议支持
 - **背景**：Model Context Protocol是Claude推出的标准化上下文协议
 - **实现**：完整的MCP Server，暴露ScriptAgent能力
   - **Tools**：生成话术、质量评估等可调用工具
@@ -135,7 +135,7 @@ Protocol Layer (标准化对外协议)
 - **对比传统API**：MCP之于AI Agent ≈ OpenAPI之于REST API
 - **示例**：`examples/mcp_server_example.py`
 
-### 10) A2A协议支持（新增 🚀）
+### 10) A2A协议支持
 - **背景**：Agent-to-Agent标准化通信协议
 - **实现**：完整的A2A路由器和消息协议
   - 标准化消息格式（兼容OpenAI/AutoGen/LangChain）
