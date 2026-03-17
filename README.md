@@ -172,70 +172,61 @@ Protocol Layer (标准化对外协议)
 | Checkpoint 层 | `script_agent/services/checkpoint_store.py` | 版本化 checkpoint、回放、审计、存储后端抽象 |
 | 限流层 | `script_agent/services/core_rate_limiter.py` | 租户维度 QPS + Token 双限流，支持 Redis 共享配额 |
 | 长期记忆层 | `script_agent/services/long_term_memory.py` | 向量化写回与检索召回（Memory/Elasticsearch） |
-| 异步任务队列层 🆕 | `script_agent/services/kafka_queue.py` | Kafka生产者/消费者、任务状态管理、优先级队列 |
-| MCP协议层 🆕 | `script_agent/protocols/mcp_server.py` | MCP Server实现、工具/资源/提示词注册 |
-| A2A协议层 🆕 | `script_agent/protocols/a2a_protocol.py` | A2A路由器、消息协议、跨框架适配 |
+| 异步任务队列层 | `script_agent/services/kafka_queue.py` | Kafka生产者/消费者、任务状态管理、优先级队列 |
+| MCP协议层 | `script_agent/protocols/mcp_server.py` | MCP Server实现、工具/资源/提示词注册 |
+| A2A协议层 | `script_agent/protocols/a2a_protocol.py` | A2A路由器、消息协议、跨框架适配 |
 | 可观测层 | `script_agent/observability/metrics.py` | 请求、延迟、锁超时、checkpoint 写入、缓存命中等指标 |
 | 配置层 | `script_agent/config/settings.py` | 环境变量集中配置，覆盖编排/锁/限流/checkpoint/LLM 主备 |
 
-## 五、核心能力设计（按模块亮点）
+## 五、核心能力设计（按模块）
 
 ### 1) API 层（`script_agent/api/app.py`）
-**出色点**
 - 同时支持同步生成与 SSE 流式生成，便于前端实时渲染。
 - 全链路注入 `trace_id`、状态与时延，便于排障。
 - 会话级并发锁保护，避免同会话并发生成造成数据污染。
 - 健康接口返回编排、锁、限流、checkpoint、长期记忆等运行状态。
 
 ### 2) 鉴权与租户隔离（`script_agent/api/auth.py`）
-**出色点**
 - 支持 `X-API-Key` 与 `Bearer JWT` 双认证模式。
 - 所有核心会话接口按 `tenant_id` 做强隔离。
 - 内置登录注册能力（SQLite 用户库），可直接用于内网运营后台。
 - 开发环境支持 bypass，降低本地联调门槛。
 
 ### 3) 编排中枢（`script_agent/agents/orchestrator.py`）
-**出色点**
 - LangGraph 声明式状态图 + 顺序回退执行双通道，鲁棒性更好。
 - 支持请求去重缓存（完成态快速返回），降低重复请求成本。
 - 流式与同步链路统一状态推进、checkpoint 写入与错误语义。
 - Skill 路由与 Agent 链路共存，可逐步扩展工具化能力。
 
 ### 4) 意图识别 Agent（`script_agent/agents/intent_agent.py`）
-**出色点**
 - 分级意图识别：快速分类优先，低置信再走 LLM 兜底。
 - 多来源槽位合并：规则抽取 + 指代消解 + 上下文继承。
 - 自动写入 `_raw_query/requirements`，让生成器拿到原始用户诉求。
 - 换品纠偏逻辑完善：自动识别“从旧商品切到新商品”，并将意图纠正到生成链路。
 
 ### 5) 达人画像 Agent（`script_agent/agents/profile_agent.py`）
-**出色点**
 - L1 本地缓存 + L2 缓存 + DB + 通用画像回退，多级容错。
 - 支持按达人/品类动态构建画像，不依赖单一数据源。
 - 在数据缺失时仍能给出可用风格配置，避免链路中断。
 
 ### 6) 商品 Agent（`script_agent/agents/product_agent.py`）
-**出色点**
 - DB 命中优先，规则知识库兜底，确保商品画像始终可构建。
 - 自动融合：商品特征、卖点、合规提醒、目标人群。
 - 内置长期记忆召回查询拼装，提升多轮场景下的话术一致性与信息密度。
 
 ### 7) 话术生成 Agent（`script_agent/agents/script_agent.py`）
-**出色点**
 - PromptBuilder 按“角色/风格/场景/商品/历史/记忆/要求”结构化组装。
 - 强制最小有效长度、句尾完整性、重复抑制、换品约束校验。
 - 主模型多次重试 + 失败后自动走 fallback 模型。
 - 输出后置清洗增强：字段回显、提示词回显、占位符、重复句等自动剥离。
 
 ### 8) 质量校验 Agent（`script_agent/agents/quality_agent.py`）
-**出色点**
 - 并行检测敏感词、合规、风格一致性、结构完整性。
 - 内置 AC 自动机敏感词扫描，效率和可解释性兼顾。
 - 对 prompt-echo、内容过简、句尾不完整、换品违规进行结构化反馈。
 - 反馈可回注到重试要求，形成“生成-质检-再生成”闭环。
 
 ### 9) LLM 客户端（`script_agent/services/llm_client.py`）
-**出色点**
 - 统一封装 `zhipu/vllm/ollama`，减少上层分支复杂度。
 - 内置重试、断路器、超时分层、fallback 计划。
 - 支持流式/同步一致清洗逻辑，显著降低脏输出。
@@ -244,39 +235,32 @@ Protocol Layer (标准化对外协议)
 ### 10) 会话与状态基础设施
 
 #### 会话存储（`script_agent/services/session_manager.py`）
-**出色点**
 - `memory/redis/sqlite` 三后端统一抽象。
 - 会话裁剪与压缩策略，控制多轮对话体积。
 
 #### Checkpoint（`script_agent/services/checkpoint_store.py`）
-**出色点**
 - 版本化保存，支持 latest / history / replay。
 - 每条记录带 checksum 与状态，便于审计与恢复。
 
 #### 并发锁（`script_agent/services/concurrency.py`）
-**出色点**
 - 支持 local/redis 分布式会话锁。
 - 锁服务异常可降级本地锁，服务不中断。
 
 #### 核心限流（`script_agent/services/core_rate_limiter.py`）
-**出色点**
 - 租户维度双限流：QPS + token/min。
 - local 与 redis 两种配额后端，适配单机与多实例。
 
 ### 11) Skill 治理与安全（`script_agent/skills/`）
-**出色点**
 - SkillRegistry 按意图评分路由，可插拔扩展生成/修改/批量技能。
 - 统一 preflight 安全链路：required slots + strict schema + role/tenant allowlist + prompt injection tripwire。
 - 工具调用治理能力独立于业务逻辑，适合持续扩展。
 
 ### 12) 领域数据仓储（`script_agent/services/domain_data_repository.py`）
-**出色点**
 - 达人画像与商品画像同库管理，默认 SQLite，部署简单。
 - 自动建表与 upsert，便于从 mock 平滑迁移到真实数据。
 - Profile/Product Agent 无缝集成，命中后可直接提升生成质量。
 
 ### 13) 前端交互（`script_agent/web/`）
-**出色点**
 - 双栏对话式 UI：会话历史 + 主对话区。
 - 支持登录/注册页面与主页面联动。
 - 生成链路含空流保护、错误提示、重生成、导出、复制。
@@ -531,7 +515,7 @@ tests/            # 单元/集成/E2E 测试
   - 启用真实鉴权策略（API Key/JWT）
   - 使用 Redis 作为锁与限流后端，避免多实例配额不一致
 
-## 十四、高级特性说明 🚀
+## 十四、高级特性说明 
 
 ### Kafka异步任务队列
 **适用场景**：
@@ -575,9 +559,6 @@ task_id = await queue.submit_task(
 # 查询状态
 status = await queue.get_task_status(task_id)
 ```
-
-更多示例：`examples/kafka_async_example.py`
-
 ---
 
 ### MCP协议支持
@@ -678,50 +659,3 @@ history = conversation.to_openai_messages()
 
 更多示例：`examples/a2a_protocol_example.py`
 
----
-
-### 技术选型建议
-
-| 场景 | 推荐方案 | 理由 |
-|-----|---------|------|
-| 内部系统，低并发 | 基础模式（同步API） | 部署简单，够用 |
-| 对外服务，高并发 | Kafka异步队列 | 性能最优，用户体验好 |
-| 跨语言集成 | MCP协议 | 标准化，易于接入 |
-| 多Agent协作 | A2A协议 | 兼容主流框架 |
-| 完整生产系统 | 三者全部启用 | 最大化能力和灵活性 |
-
----
-
-## 十五、面试亮点总结 💼
-
-本项目已具备大厂级工程能力，适合作为面试项目展示：
-
-### 核心技术亮点
-1. **多Agent协同架构**：6个专职Agent协作，LangGraph编排
-2. **生产级可靠性**：分布式锁、熔断降级、双LLM容错、质量反馈闭环
-3. **高性能优化**：三级缓存、异步并行、流式输出
-4. **标准化协议**：MCP、A2A协议，跨框架互操作
-5. **异步任务队列**：Kafka削峰填谷，P99延迟<200ms
-6. **可观测性**：Prometheus + Grafana监控
-
-### 对标职位要求
-- ✅ Agent应用核心开发（6-Agent架构 + LangGraph）
-- ✅ Python后端开发（FastAPI + 异步编程）
-- ✅ LLM技术应用（vLLM + 智谱GLM-4）
-- ✅ **MCP协议**（完整实现，tools/resources/prompts）🆕
-- ✅ **A2A协议**（兼容OpenAI/AutoGen/LangChain）🆕
-- ✅ 高并发处理（分布式锁 + 限流 + 异步队列）
-- ✅ 分布式系统（Redis + Kafka + 断点恢复）
-- ✅ 数据库优化（三级缓存 + SQLite）
-
-### 性能指标
-- **并发能力**：150并发session，峰值QPS 50
-- **响应延迟**：P50=2.1s（同步），P99<200ms（异步）
-- **可用性**：99.5%
-- **成本优化**：$6,670/月（相比GPT-4节省99.8%）
-
-### 面试准备资料
-- 完整面试指南：`JOB_PREPARATION_GUIDE.md`
-- 快速问答手册：`INTERVIEW_QA_CHEATSHEET.md`
-- 技术深度解析：`INTERVIEW_GUIDE.md`
-- 技术分享文档：`TECH_SHARING.md`
